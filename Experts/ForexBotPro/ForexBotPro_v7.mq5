@@ -179,10 +179,19 @@ input int InpDashboardX = -510;                    // X position (negative = fro
 input int InpDashboardY = 30;                      // Y position
 input int InpDashboardWidth = 300;                 // Width (pixels)
 input int InpDashboardHeight = 520;                // Height (pixels)
+input bool InpEnableDualSideDashboard = true;      // Show left + right side dashboards
+input int InpLeftDashboardX = 20;                  // Left panel X position
+input int InpLeftDashboardY = 30;                  // Left panel Y position
+input int InpLeftDashboardWidth = 300;             // Left panel width (pixels)
+input int InpLeftDashboardHeight = 520;            // Left panel height (pixels)
 input bool InpShowPerfSection = true;              // Show performance metrics
 input bool InpShowTradingSection = true;           // Show trading status
 input bool InpShowStatsSection = true;             // Show cumulative statistics
 input int InpDashboardRefreshMs = 500;             // Refresh rate (milliseconds)
+input group "┌─ INTRADAY SIGNAL QUALITY"
+input bool InpEnableIntradaySignalQuota = true;    // Limit intraday entries per day
+input int InpMaxIntradaySignalsPerDay = 3;         // Max approved entries per day
+input int InpMinMinutesBetweenSignals = 90;        // Minimum minutes between entries
 //+------------------------------------------------------------------+
 //| DEPRECATED PARAMETERS (Legacy Support)                          |
 //+------------------------------------------------------------------+
@@ -234,6 +243,7 @@ CVisualPatternDetector g_visualPatterns;
 CTelegramNotifier g_telegram;
 CCompoundInterestV2 g_compoundInterest;
 CProfessionalDashboard g_dashboard;
+CProfessionalDashboard g_dashboardLeft;
 datetime g_lastScanTime = 0;
 TradeFeatureSnapshot g_tradeContextMap[];
 ulong g_tradeContextTickets[];
@@ -246,6 +256,68 @@ string g_openedCharts[];
 int g_openedChartsCount = 0;
 ulong g_lastCheckedTickets[];
 int g_lastCheckedCount = 0;
+int g_todaySignalCount = 0;
+int g_signalCountDayKey = -1;
+datetime g_lastSignalTime = 0;
+
+int BuildDayKey(datetime value)
+{
+   MqlDateTime dt;
+   TimeToStruct(value, dt);
+   return dt.year * 10000 + dt.mon * 100 + dt.day;
+}
+
+void ResetIntradaySignalCounterIfNeeded()
+{
+   int currentDayKey = BuildDayKey(TimeCurrent());
+   if(currentDayKey != g_signalCountDayKey)
+   {
+      g_signalCountDayKey = currentDayKey;
+      g_todaySignalCount = 0;
+      g_lastSignalTime = 0;
+      Print("[INTRADAY] Nuevo día detectado. Contador reiniciado.");
+   }
+}
+
+bool CanOpenNewIntradaySignal(string symbol)
+{
+   if(!InpEnableIntradaySignalQuota)
+      return true;
+
+   ResetIntradaySignalCounterIfNeeded();
+
+   if(g_todaySignalCount >= InpMaxIntradaySignalsPerDay)
+   {
+      LogBlock(symbol, "cupo diario de señales agotado");
+      return false;
+   }
+
+   if(g_lastSignalTime > 0)
+   {
+      int elapsedMinutes = (int)((TimeCurrent() - g_lastSignalTime) / 60);
+      if(elapsedMinutes < InpMinMinutesBetweenSignals)
+      {
+         LogBlock(symbol, "esperando separación mínima entre señales");
+         return false;
+      }
+   }
+
+   return true;
+}
+
+void RegisterIntradaySignalExecution(string symbol)
+{
+   if(!InpEnableIntradaySignalQuota)
+      return;
+
+   ResetIntradaySignalCounterIfNeeded();
+   g_todaySignalCount++;
+   g_lastSignalTime = TimeCurrent();
+
+   Print("[INTRADAY] Señal ejecutada en ", symbol,
+      " | Señales del día: ", g_todaySignalCount, "/", InpMaxIntradaySignalsPerDay);
+}
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
@@ -371,13 +443,25 @@ int OnInit()
    if(InpShowProfessionalDashboard)
    {
       int dashboardX = -InpDashboardWidth;
+      g_dashboard.SetPanelName("FOREXBOTPRO_DASHBOARD_RIGHT");
       g_dashboard.Initialize(ChartID(), dashboardX, InpDashboardY, InpDashboardTheme);
       g_dashboard.SetSize(InpDashboardWidth, InpDashboardHeight);
       g_dashboard.SetSections(InpShowPerfSection, InpShowTradingSection, InpShowStatsSection);
       g_dashboard.SetUpdateInterval(InpDashboardRefreshMs);
-      Print("Professional Dashboard: ACTIVADO");
+
+      if(InpEnableDualSideDashboard)
+      {
+         g_dashboardLeft.SetPanelName("FOREXBOTPRO_DASHBOARD_LEFT");
+         g_dashboardLeft.Initialize(ChartID(), InpLeftDashboardX, InpLeftDashboardY, InpDashboardTheme);
+         g_dashboardLeft.SetSize(InpLeftDashboardWidth, InpLeftDashboardHeight);
+         g_dashboardLeft.SetSections(InpShowPerfSection, InpShowTradingSection, InpShowStatsSection);
+         g_dashboardLeft.SetUpdateInterval(InpDashboardRefreshMs);
+      }
+
+      Print("Professional Dashboard: ACTIVADO", InpEnableDualSideDashboard ? " (L/R)" : " (R)");
    }
    
+   ResetIntradaySignalCounterIfNeeded();
    g_initialized = true;
    Print("=== Inicialización Completa ===");
    EventSetTimer(InpScanInterval);
@@ -393,6 +477,8 @@ void OnDeinit(const int reason)
    if(InpShowProfessionalDashboard)
    {
       g_dashboard.Cleanup();
+      if(InpEnableDualSideDashboard)
+         g_dashboardLeft.Cleanup();
       Print("Professional Dashboard: LIMPIADO");
    }
    
@@ -446,13 +532,20 @@ void OnTick()
       if(currentChartWidth != lastChartWidth)
       {
          g_dashboard.RecalculatePosition();
+         if(InpEnableDualSideDashboard)
+            g_dashboardLeft.RecalculatePosition();
          lastChartWidth = currentChartWidth;
       }
-      
-      if(g_dashboard.NeedsUpdate())
+
+      bool rightNeedsUpdate = g_dashboard.NeedsUpdate();
+      bool leftNeedsUpdate = InpEnableDualSideDashboard && g_dashboardLeft.NeedsUpdate();
+      if(rightNeedsUpdate || leftNeedsUpdate)
       {
          UpdateProfessionalDashboard();
-         g_dashboard.Draw();
+         if(rightNeedsUpdate)
+            g_dashboard.Draw();
+         if(leftNeedsUpdate)
+            g_dashboardLeft.Draw();
          ChartRedraw(ChartID());
       }
    }
@@ -971,12 +1064,16 @@ void AnalyzeAndTradeSingle()
    if(InpSecondaryTF == PERIOD_H1 && mtfAligned)
       slMultiplier = InpSLTightenOnH1Align;
    
+   if(!CanOpenNewIntradaySignal(_Symbol))
+      return;
+
    // Open position
    ulong ticket = g_positionManager.OpenPosition(_Symbol, finalSignal, combinedConfidence,
       killZoneNum, beeKayLevelNum, dayCycleNum, patternTargetPrice, slMultiplier);
    
    if(ticket > 0)
    {
+      RegisterIntradaySignalExecution(_Symbol);
       Print("Orden ejecutada - Ticket: ", ticket);
       
       ENUM_POSITION_TYPE posType = (finalSignal == SIGNAL_BUY || finalSignal == SIGNAL_STRONG_BUY ||
@@ -1163,11 +1260,15 @@ void ProcessMultiPairSignals()
       if(InpSecondaryTF == PERIOD_H1 && best.mtfStatus == "OK")
          slMultiplier = InpSLTightenOnH1Align;
       
+      if(!CanOpenNewIntradaySignal(best.symbol))
+         return;
+
       ulong ticket = g_positionManager.OpenPosition(best.symbol, best.signal, adjustedScore,
          killZoneNum, beeKayLevelNum, dayCycleNum, 0.0, slMultiplier);
       
       if(ticket > 0)
       {
+         RegisterIntradaySignalExecution(best.symbol);
          Print("Orden ejecutada - Ticket: ", ticket);
          
          ENUM_POSITION_TYPE posType = (best.signal == SIGNAL_BUY || best.signal == SIGNAL_STRONG_BUY ||
@@ -1795,6 +1896,8 @@ void UpdateProfessionalDashboard(void)
    }
    
    g_dashboard.UpdatePerformanceData(winRate, totalProfit, drawdown, rrRatio);
+   if(InpEnableDualSideDashboard)
+      g_dashboardLeft.UpdatePerformanceData(winRate, totalProfit, drawdown, rrRatio);
    
    // Get trading status
    int activePositions = g_positionManager.CountPositions();
@@ -1803,6 +1906,8 @@ void UpdateProfessionalDashboard(void)
    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    
    g_dashboard.UpdateTradingData(activePositions, maxPositions, accountEquity, accountBalance);
+   if(InpEnableDualSideDashboard)
+      g_dashboardLeft.UpdateTradingData(activePositions, maxPositions, accountEquity, accountBalance);
    
    // Get statistics with safe fallbacks
    int totalTrades = 0;
@@ -1850,6 +1955,8 @@ void UpdateProfessionalDashboard(void)
    }
    
    g_dashboard.UpdateStatisticsData(avgProfit, avgLoss, totalTrades, winTrades);
+   if(InpEnableDualSideDashboard)
+      g_dashboardLeft.UpdateStatisticsData(avgProfit, avgLoss, totalTrades, winTrades);
 }
 //+------------------------------------------------------------------+
 //| Chart Event Handler                                              |

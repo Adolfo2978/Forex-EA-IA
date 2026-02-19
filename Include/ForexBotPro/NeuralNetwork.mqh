@@ -92,6 +92,9 @@ private:
    int m_consecutiveWins;
    int m_consecutiveLosses;
    datetime m_lastAdaptation;
+   NNPrediction m_cachedPrediction;
+   bool m_hasCachedPrediction;
+   datetime m_cachedBarTime;
    
    double ReLU(double x) { return MathMax(0, x); }
    
@@ -143,6 +146,13 @@ public:
       m_consecutiveWins = 0;
       m_consecutiveLosses = 0;
       m_lastAdaptation = 0;
+      m_hasCachedPrediction = false;
+      m_cachedBarTime = 0;
+      m_cachedPrediction.signal = SIGNAL_NEUTRAL;
+      m_cachedPrediction.confidence = 50.0;
+      m_cachedPrediction.buyProb = 0.33;
+      m_cachedPrediction.sellProb = 0.33;
+      m_cachedPrediction.neutralProb = 0.34;
    }
    
    void Init(string symbol, ENUM_TIMEFRAMES timeframe, int gmtOffset = 0)
@@ -628,6 +638,10 @@ public:
          Print("NN: Not initialized, returning neutral");
          return result;
       }
+
+      datetime currentBarTime = iTime(m_symbol, m_timeframe, 0);
+      if(m_hasCachedPrediction && currentBarTime > 0 && currentBarTime == m_cachedBarTime)
+         return m_cachedPrediction;
       
       double features[];
       if(!ExtractFeatures(features))
@@ -690,6 +704,13 @@ public:
       
       result.confidence = ApplyAdaptiveConfidence(result.confidence, features);
       result.confidence = MathMax(0, MathMin(100, result.confidence));
+
+      if(currentBarTime > 0)
+      {
+         m_cachedPrediction = result;
+         m_cachedBarTime = currentBarTime;
+         m_hasCachedPrediction = true;
+      }
       
       return result;
    }
@@ -1778,6 +1799,7 @@ public:
    void OnlineLearn(bool wasCorrect, double &features[])
    {
       if(!m_weightsLoaded || ArraySize(features) != NN_INPUT_SIZE) return;
+      m_hasCachedPrediction = false;
       
       int correctLabel = wasCorrect ? 0 : 2;
       
@@ -1894,6 +1916,13 @@ public:
       m_consecutiveWins = 0;
       m_consecutiveLosses = 0;
       m_lastAdaptation = 0;
+      m_hasCachedPrediction = false;
+      m_cachedBarTime = 0;
+      m_cachedPrediction.signal = SIGNAL_NEUTRAL;
+      m_cachedPrediction.confidence = 50.0;
+      m_cachedPrediction.buyProb = 0.33;
+      m_cachedPrediction.sellProb = 0.33;
+      m_cachedPrediction.neutralProb = 0.34;
       Print("NN: Learning reset to defaults");
    }
 };

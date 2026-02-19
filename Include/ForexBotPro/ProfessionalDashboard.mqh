@@ -114,6 +114,7 @@ public:
    void              SetPosition(int x, int y);
    void              SetSize(int width, int height);
    void              SetTheme(ENUM_DASHBOARD_THEME theme);
+   void              SetPanelName(string panelName);
    void              SetSections(bool performance, bool trading, bool statistics);
    void              SetUpdateInterval(int milliseconds);
    void              SetFullWidthMode(bool enable);
@@ -377,6 +378,20 @@ void CProfessionalDashboard::SetTheme(ENUM_DASHBOARD_THEME theme)
 {
    m_theme = theme;
    InitializeColors();
+   m_lastUpdate = 0;
+}
+
+//+------------------------------------------------------------------+
+//| Set Panel Name (unique object namespace)                        |
+//+------------------------------------------------------------------+
+
+void CProfessionalDashboard::SetPanelName(string panelName)
+{
+   if(StringLen(panelName) < 3)
+      return;
+
+   Cleanup();
+   m_panelName = panelName;
    m_lastUpdate = 0;
 }
 
