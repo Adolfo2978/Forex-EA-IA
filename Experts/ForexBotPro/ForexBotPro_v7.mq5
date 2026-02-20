@@ -313,6 +313,31 @@ void RegisterIntradaySignalExecution(string symbol)
       " | Señales del día: ", g_todaySignalCount, "/", InpMaxIntradaySignalsPerDay);
 }
 
+
+void CleanupLegacyDashboardObjects(long chartId)
+{
+   string legacyPrefixes[] =
+   {
+      "FOREXBOTPRO_DASHBOARD_",
+      "FOREXBOTPRO_DASHBOARD_LEFT_",
+      "FOREXBOTPRO_DASHBOARD_RIGHT_"
+   };
+
+   int total = ObjectsTotal(chartId, 0, -1);
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(chartId, i, 0);
+      for(int p = 0; p < ArraySize(legacyPrefixes); p++)
+      {
+         if(StringFind(objName, legacyPrefixes[p]) == 0)
+         {
+            ObjectDelete(chartId, objName);
+            break;
+         }
+      }
+   }
+}
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
@@ -434,6 +459,9 @@ int OnInit()
       Print("Telegram Notificaciones: ACTIVADO");
    }
    
+   // Cleanup old/legacy dashboard objects from previous versions
+   CleanupLegacyDashboardObjects(ChartID());
+
    // Initialize Professional Dashboard
    if(InpShowProfessionalDashboard)
    {
@@ -462,6 +490,7 @@ void OnDeinit(const int reason)
    if(InpShowProfessionalDashboard)
    {
       g_dashboard.Cleanup();
+      CleanupLegacyDashboardObjects(ChartID());
       Print("Professional Dashboard: LIMPIADO");
    }
    
