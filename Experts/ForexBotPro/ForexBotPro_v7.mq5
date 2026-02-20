@@ -55,6 +55,7 @@ input ENUM_TIMEFRAMES InpSecondaryTF = PERIOD_H1; // Secondary timeframe (MTF)
 input bool InpUseH1TrendFilter = true;
 input double InpSLTightenOnH1Align = 0.85;
 input int InpScanInterval = 60;                    // Scanner interval (seconds)
+input int InpScannerBatchSize = 4;                 // Symbols processed per timer cycle (0=all)
 input int InpGMTOffset = 0;                        // GMT offset for session detection
 input group "┌─ TRADING MODE"
 input bool InpMultiPairMode = true;                // Enable multi-pair scanning
@@ -188,6 +189,10 @@ input group "┌─ INTRADAY SIGNAL QUALITY"
 input bool InpEnableIntradaySignalQuota = true;    // Limit intraday entries per day
 input int InpMaxIntradaySignalsPerDay = 3;         // Max approved entries per day
 input int InpMinMinutesBetweenSignals = 90;        // Minimum minutes between entries
+input bool InpAdaptiveConfidenceThreshold = true;   // Dynamically relax strict confidence filter
+input double InpMaxConfidenceRelaxation = 8.0;      // Max confidence reduction in low volatility
+input double InpVolatilityReferenceATRPercent = 0.0012; // ATR/price reference for threshold tuning
+input bool InpBypassLegacyHardFilters = true;       // Ignore deprecated hard filters by default
 //+------------------------------------------------------------------+
 //| DEPRECATED PARAMETERS (Legacy Support)                          |
 //+------------------------------------------------------------------+
@@ -314,6 +319,41 @@ void RegisterIntradaySignalExecution(string symbol)
 }
 
 
+
+double GetAdaptiveConfidenceThreshold(string symbol)
+{
+   double threshold = InpMinConfidenceLevel;
+   if(!InpAdaptiveConfidenceThreshold)
+      return threshold;
+
+   int atrHandle = iATR(symbol, InpPrimaryTF, 14);
+   if(atrHandle == INVALID_HANDLE)
+      return threshold;
+
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   int copied = CopyBuffer(atrHandle, 0, 0, 1, atrBuf);
+   IndicatorRelease(atrHandle);
+   if(copied < 1 || atrBuf[0] <= 0)
+      return threshold;
+
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   if(bid <= 0)
+      bid = SymbolInfoDouble(symbol, SYMBOL_LAST);
+   if(bid <= 0)
+      return threshold;
+
+   double atrPercent = atrBuf[0] / bid;
+   double relax = 0.0;
+   if(atrPercent < InpVolatilityReferenceATRPercent)
+   {
+      double deficit = (InpVolatilityReferenceATRPercent - atrPercent) / InpVolatilityReferenceATRPercent;
+      relax = MathMin(InpMaxConfidenceRelaxation, deficit * InpMaxConfidenceRelaxation);
+   }
+
+   return MathMax(55.0, threshold - relax);
+}
+
 void CleanupLegacyDashboardObjects(long chartId)
 {
    string legacyPrefixes[] =
@@ -377,7 +417,9 @@ int OnInit()
    // Initialize Multi-Pair Scanner
    if(InpMultiPairMode)
    {
-      g_scanner.Init(InpPrimaryTF, InpSecondaryTF, InpMinConfidenceLevel);
+      double scannerMinConf = InpAdaptiveConfidenceThreshold ? MathMax(55.0, InpMinConfidenceLevel - InpMaxConfidenceRelaxation) : InpMinConfidenceLevel;
+      g_scanner.Init(InpPrimaryTF, InpSecondaryTF, scannerMinConf);
+      g_scanner.SetScanBatchSize(InpScannerBatchSize);
       g_scanner.SetMagicNumber(InpMagicNumber);
       g_scanner.SetMarketMakerParams(InpUseMarketMaker, InpMMWeight, InpGMTOffset);
       
@@ -984,10 +1026,11 @@ void AnalyzeAndTradeSingle()
       }
    }
    
-   // Check minimum confidence
-   if(combinedConfidence < InpMinConfidenceLevel)
+   // Check minimum confidence (adaptive threshold)
+   double adaptiveThreshold = GetAdaptiveConfidenceThreshold(_Symbol);
+   if(combinedConfidence < adaptiveThreshold)
    {
-      Print("Confianza insuficiente: ", DoubleToString(combinedConfidence, 1), "% < ", InpMinConfidenceLevel, "%");
+      Print("Confianza insuficiente: ", DoubleToString(combinedConfidence, 1), "% < ", DoubleToString(adaptiveThreshold, 1), "%");
       LogBlock(_Symbol, "confianza baja");
       return;
    }
@@ -1000,7 +1043,7 @@ void AnalyzeAndTradeSingle()
    }
    
    // Check EMA alignment
-   if(InpRequireEMAAlignment)
+   if(!InpBypassLegacyHardFilters && InpRequireEMAAlignment)
    {
       if(technicalSignal == SIGNAL_BUY || technicalSignal == SIGNAL_STRONG_BUY)
       {
@@ -1023,7 +1066,7 @@ void AnalyzeAndTradeSingle()
    }
    
    // Check MTF alignment
-   if(InpRequireMTFAlignment && !g_alignment.CheckMTFAlignment())
+   if(!InpBypassLegacyHardFilters && InpRequireMTFAlignment && !g_alignment.CheckMTFAlignment())
    {
       Print("MTF no alineado - Señal descartada");
       LogBlock(_Symbol, "mtf requerido");
@@ -1181,7 +1224,8 @@ void ProcessMultiPairSignals()
    }
    
    PairAnalysis best = g_scanner.GetBestSignal();
-   if(best.combinedScore >= InpMinConfidenceLevel && best.signal != SIGNAL_NEUTRAL)
+   double adaptiveThreshold = (best.symbol != "") ? GetAdaptiveConfidenceThreshold(best.symbol) : InpMinConfidenceLevel;
+   if(best.combinedScore >= adaptiveThreshold && best.signal != SIGNAL_NEUTRAL)
    {
       if(!CheckTradingConditions(best.symbol))
          return;
@@ -1340,7 +1384,7 @@ void ProcessMultiPairSignals()
       if(InpDebugMode)
       {
          Print("[BLOCK] MULTI: sin señal | score=", DoubleToString(best.combinedScore, 1),
-            " | signal=", EnumToString(best.signal));
+            " | min=", DoubleToString(adaptiveThreshold, 1), " | signal=", EnumToString(best.signal));
       }
    }
 }

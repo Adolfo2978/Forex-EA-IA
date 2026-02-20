@@ -95,6 +95,9 @@ private:
    NNPrediction m_cachedPrediction;
    bool m_hasCachedPrediction;
    datetime m_cachedBarTime;
+   double m_cachedFeatures[];
+   bool m_hasCachedFeatures;
+   datetime m_cachedFeaturesBarTime;
    
    double ReLU(double x) { return MathMax(0, x); }
    
@@ -147,12 +150,15 @@ public:
       m_consecutiveLosses = 0;
       m_lastAdaptation = 0;
       m_hasCachedPrediction = false;
+      m_hasCachedFeatures = false;
       m_cachedBarTime = 0;
+      m_cachedFeaturesBarTime = 0;
       m_cachedPrediction.signal = SIGNAL_NEUTRAL;
       m_cachedPrediction.confidence = 50.0;
       m_cachedPrediction.buyProb = 0.33;
       m_cachedPrediction.sellProb = 0.33;
       m_cachedPrediction.neutralProb = 0.34;
+      ArrayResize(m_cachedFeatures, NN_INPUT_SIZE);
    }
    
    void Init(string symbol, ENUM_TIMEFRAMES timeframe, int gmtOffset = 0)
@@ -624,6 +630,32 @@ public:
       Softmax(outputs, NN_OUTPUT_SIZE);
    }
    
+   bool GetCachedFeatures(double &features[])
+   {
+      datetime currentBarTime = iTime(m_symbol, m_timeframe, 0);
+      if(m_hasCachedFeatures && currentBarTime > 0 && currentBarTime == m_cachedFeaturesBarTime && ArraySize(m_cachedFeatures) == NN_INPUT_SIZE)
+      {
+         ArrayResize(features, NN_INPUT_SIZE);
+         for(int i = 0; i < NN_INPUT_SIZE; i++)
+            features[i] = m_cachedFeatures[i];
+         return true;
+      }
+
+      if(!ExtractFeatures(features))
+         return false;
+
+      if(currentBarTime > 0 && ArraySize(features) == NN_INPUT_SIZE)
+      {
+         ArrayResize(m_cachedFeatures, NN_INPUT_SIZE);
+         for(int i = 0; i < NN_INPUT_SIZE; i++)
+            m_cachedFeatures[i] = features[i];
+         m_cachedFeaturesBarTime = currentBarTime;
+         m_hasCachedFeatures = true;
+      }
+
+      return true;
+   }
+
    NNPrediction Predict()
    {
       NNPrediction result;
@@ -644,7 +676,7 @@ public:
          return m_cachedPrediction;
       
       double features[];
-      if(!ExtractFeatures(features))
+      if(!GetCachedFeatures(features))
       {
          Print("NN: Failed to extract features");
          return result;
@@ -830,7 +862,7 @@ public:
    double GetSimplePrediction()
    {
       double features[];
-      if(!ExtractFeatures(features)) return 50.0;
+      if(!GetCachedFeatures(features)) return 50.0;
       
       double momentumScore = (features[13] + features[14] + features[15]) * 40;
       double emaScore = (features[4] + features[5] + features[6] + features[7]) * 25;
@@ -860,7 +892,7 @@ public:
    double GetTechnicalIndicatorScore()
    {
       double features[];
-      if(!ExtractFeatures(features)) return 50.0;
+      if(!GetCachedFeatures(features)) return 50.0;
       
       double score = 50.0;
       
@@ -1800,6 +1832,7 @@ public:
    {
       if(!m_weightsLoaded || ArraySize(features) != NN_INPUT_SIZE) return;
       m_hasCachedPrediction = false;
+      m_hasCachedFeatures = false;
       
       int correctLabel = wasCorrect ? 0 : 2;
       
@@ -1917,12 +1950,15 @@ public:
       m_consecutiveLosses = 0;
       m_lastAdaptation = 0;
       m_hasCachedPrediction = false;
+      m_hasCachedFeatures = false;
       m_cachedBarTime = 0;
+      m_cachedFeaturesBarTime = 0;
       m_cachedPrediction.signal = SIGNAL_NEUTRAL;
       m_cachedPrediction.confidence = 50.0;
       m_cachedPrediction.buyProb = 0.33;
       m_cachedPrediction.sellProb = 0.33;
       m_cachedPrediction.neutralProb = 0.34;
+      ArrayResize(m_cachedFeatures, NN_INPUT_SIZE);
       Print("NN: Learning reset to defaults");
    }
 };

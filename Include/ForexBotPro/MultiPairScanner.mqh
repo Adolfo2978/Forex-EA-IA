@@ -74,6 +74,8 @@ private:
    int m_trainProgress;
    int m_currentScanIndex;
    bool m_isScanning;
+   int m_scanBatchSize;
+   int m_nextScanStart;
    
 public:
    CMultiPairScanner()
@@ -93,6 +95,8 @@ public:
       m_trainProgress = 0;
       m_currentScanIndex = 0;
       m_isScanning = false;
+      m_scanBatchSize = 0;
+      m_nextScanStart = 0;
       m_useMarketMaker = true;
       m_mmWeight = 0.25;
       m_gmtOffset = 0;
@@ -118,6 +122,7 @@ public:
    }
    
    void SetMagicNumber(ulong magic) { m_magicNumber = magic; }
+   void SetScanBatchSize(int batchSize) { m_scanBatchSize = MathMax(0, batchSize); }
    
    bool AddSymbol(string symbol)
    {
@@ -195,23 +200,50 @@ public:
    {
       m_isScanning = true;
       UpdateOpenOrders();
-      
-      for(int i = 0; i < m_symbolCount; i++)
+
+      if(m_symbolCount <= 0)
+      {
+         m_isScanning = false;
+         return;
+      }
+
+      int start = 0;
+      int end = m_symbolCount;
+      if(m_scanBatchSize > 0 && m_scanBatchSize < m_symbolCount)
+      {
+         start = m_nextScanStart;
+         if(start < 0 || start >= m_symbolCount)
+            start = 0;
+         end = MathMin(start + m_scanBatchSize, m_symbolCount);
+      }
+
+      for(int i = start; i < end; i++)
       {
          m_currentScanIndex = i;
          m_analysis[i].scanProgress = 0;
-         
+
          UpdateScanProgress(i, 10);
          ScanSymbol(i);
          UpdateScanProgress(i, 100);
-         
-         UpdatePanel();
       }
-      
+
+      if(m_scanBatchSize > 0 && m_scanBatchSize < m_symbolCount)
+      {
+         m_nextScanStart = end;
+         if(m_nextScanStart >= m_symbolCount)
+            m_nextScanStart = 0;
+      }
+      else
+      {
+         m_nextScanStart = 0;
+      }
+
+      UpdatePanel();
+
       m_isScanning = false;
       m_currentScanIndex = -1;
    }
-   
+
    void UpdateScanProgress(int index, double progress)
    {
       if(index >= 0 && index < m_symbolCount)
