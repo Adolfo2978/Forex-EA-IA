@@ -47,10 +47,15 @@ input       double      inLot=      0.01;       // Volumen comercial
 input       ushort      inMaxThree= 3;          //Together triangles open
 input      int         inMagic=    300;        //EA number
 input      string      inCmnt=     "Arbitraje T ";       //Comment
+input      bool        inUseIA=    true;       // Activar filtro adaptativo (IA)
+input      double      inAIAgressividad=0.35;  // 0.0 a 1.0, sensibilidad del filtro IA
 
 
 int         glAccountsType=0; // tipo de cuenta. cobertura o red
 int         glFileLog=0;      // manejar el archivo de registro
+string      glPanelBgName="ARB_PANEL_BG";
+string      glPanelTextName="ARB_PANEL_TEXT";
+
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -109,6 +114,7 @@ int OnInit()
   }
 void OnDeinit(const int reason)
   {
+   fnDeletePanel();
    FileClose(glFileLog);
    Print("Stop EA: "+MQLInfoString(MQL_PROGRAM_NAME)+"\n===============================================");
    Comment("");
@@ -254,14 +260,127 @@ struct stThree
    double            PLSell;           // ¿Cuánto puedes ganar si vendes un triángulo?
    double            spreadbuy;           // Costo total de los tres diferenciales. con comisión
    double            spreadsell;           // Costo total de los tres diferenciales. con comisión
-                     stThree(){status=0;magic=0;timeopen=0;}
+   double            aiScore;            // Score adaptativo IA [-1..1]
+   uint              aiTrades;           // Total de operaciones cerradas
+   uint              aiWins;             // Cierres positivos
+   uint              aiLosses;           // Cierres negativos
+   double            aiConfidence;       // Confianza actual de señal [0..100]
+   double            lastPL;             // Último resultado cerrado
+                     stThree(){status=0;magic=0;timeopen=0;aiScore=0;aiTrades=0;aiWins=0;aiLosses=0;aiConfidence=0;lastPL=0;}
   };
+
+double fnClamp(double val,double mn,double mx);
+void fnUpdateAIScore(stThree &MxSmb[],int idx);
+void fnDeletePanel();
+void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree);
 
   // Modos de trabajo del EA  
 
 stThree  MxThree[];           // matriz principal donde se almacenan los triángulos de trabajo y todos los datos adicionales necesarios
 
 CSupport       csup;          // matriz principal donde se almacenan los triángulos de trabajo y todos los datos adicionales necesarios
+
+double fnClamp(double val,double mn,double mx)
+  {
+   if(val<mn) return(mn);
+   if(val>mx) return(mx);
+   return(val);
+  }
+
+void fnUpdateAIScore(stThree &MxSmb[],int idx)
+  {
+   if(idx<0 || idx>=ArraySize(MxSmb)) return;
+
+   MxSmb[idx].aiTrades++;
+   MxSmb[idx].lastPL=MxSmb[idx].pl;
+
+   double outcome=-1.0;
+   if(MxSmb[idx].pl>inProfit && MxSmb[idx].pl>0)
+     {
+      outcome=1.0;
+      MxSmb[idx].aiWins++;
+     }
+   else MxSmb[idx].aiLosses++;
+
+   // EMA simple como capa adaptativa de decisión
+   MxSmb[idx].aiScore=0.85*MxSmb[idx].aiScore+0.15*outcome;
+   MxSmb[idx].aiScore=fnClamp(MxSmb[idx].aiScore,-1.0,1.0);
+  }
+
+void fnDeletePanel()
+  {
+   ObjectDelete(0,glPanelBgName);
+   ObjectDelete(0,glPanelTextName);
+  }
+
+void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
+  {
+   string txt=" ARBITRAJE TRIANGULAR PRO\n";
+   txt+="==========================\n";
+   txt+="Triangulos: "+(string)ArraySize(MxSmb)+"\n";
+   txt+="Abiertos: "+(string)lcOpenThree+"\n";
+
+   double bestEdge=-DBL_MAX;
+   int bestIdx=-1;
+   double openPL=0;
+   double avgScore=0;
+   uint totalTrades=0,totalWins=0,totalLosses=0;
+
+   for(int i=ArraySize(MxSmb)-1;i>=0;i--)
+     {
+      double edge=MathMax(MxSmb[i].PLBuy-MxSmb[i].spreadbuy,MxSmb[i].PLSell-MxSmb[i].spreadsell);
+      if(edge>bestEdge)
+        {
+         bestEdge=edge;
+         bestIdx=i;
+        }
+      if(MxSmb[i].status==2) openPL+=MxSmb[i].pl;
+
+      avgScore+=MxSmb[i].aiScore;
+      totalTrades+=MxSmb[i].aiTrades;
+      totalWins+=MxSmb[i].aiWins;
+      totalLosses+=MxSmb[i].aiLosses;
+     }
+
+   if(ArraySize(MxSmb)>0) avgScore/=ArraySize(MxSmb);
+
+   txt+="P/L abierto: "+DoubleToString(openPL,2)+"\n";
+   txt+="Score IA prom: "+DoubleToString(avgScore,3)+"\n";
+   txt+="Trades IA: "+(string)totalTrades+" (W:"+(string)totalWins+" L:"+(string)totalLosses+")\n";
+
+   if(bestIdx>=0)
+     {
+      txt+="--------------------------\n";
+      txt+="Mejor oportunidad:\n";
+      txt+=MxSmb[bestIdx].smb1.name+"+"+MxSmb[bestIdx].smb2.name+"+"+MxSmb[bestIdx].smb3.name+"\n";
+      txt+="PLBuy: "+DoubleToString(MxSmb[bestIdx].PLBuy,2)+" / Coste: "+DoubleToString(MxSmb[bestIdx].spreadbuy,2)+"\n";
+      txt+="PLSell: "+DoubleToString(MxSmb[bestIdx].PLSell,2)+" / Coste: "+DoubleToString(MxSmb[bestIdx].spreadsell,2)+"\n";
+      txt+="Confianza IA: "+DoubleToString(MxSmb[bestIdx].aiConfidence,1)+"%\n";
+     }
+
+   if(ObjectFind(0,glPanelBgName)<0)
+      ObjectCreate(0,glPanelBgName,OBJ_RECTANGLE_LABEL,0,0,0);
+
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_XDISTANCE,10);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_YDISTANCE,20);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_XSIZE,350);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_YSIZE,250);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_BGCOLOR,background_color);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_COLOR,clrBlack);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_BACK,false);
+
+   if(ObjectFind(0,glPanelTextName)<0)
+      ObjectCreate(0,glPanelTextName,OBJ_LABEL,0,0,0);
+
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_XDISTANCE,20);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_YDISTANCE,30);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_COLOR,clrWhite);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_FONTSIZE,9);
+   ObjectSetString(0,glPanelTextName,OBJPROP_FONT,"Consolas");
+   ObjectSetString(0,glPanelTextName,OBJPROP_TEXT,txt);
+  }
 
 
 //+------------------------------------------------------------------+
@@ -857,8 +976,24 @@ void fnCalcDelta(stThree &MxSmb[],double prft,string cmnt,int magic,double lot,u
       MxSmb[i].spreadbuy=NormalizeDouble(MxSmb[i].spreadbuy,2);
       MxSmb[i].spreadsell=NormalizeDouble(MxSmb[i].spreadsell,2);
 
+      // Métrica de edge y confianza para panel/filtro adaptativo IA
+      double edgeBuy=MxSmb[i].PLBuy-MxSmb[i].spreadbuy;
+      double edgeSell=MxSmb[i].PLSell-MxSmb[i].spreadsell;
+      double bestEdge=MathMax(edgeBuy,edgeSell);
+      double worstEdge=MathMin(edgeBuy,edgeSell);
+      double den=MathAbs(bestEdge)+MathAbs(worstEdge)+0.00001;
+      MxSmb[i].aiConfidence=fnClamp(((bestEdge-worstEdge)/den)*100.0,0.0,100.0);
+
+      bool allowByIA=true;
+      if(inUseIA)
+        {
+         double minScore=-0.25+inAIAgressividad*0.50;
+         double minConf=20.0+inAIAgressividad*55.0;
+         allowByIA=(MxSmb[i].aiScore>=minScore && MxSmb[i].aiConfidence>=minConf);
+        }
+
       // Si hay ganancias potenciales, entonces es necesario realizar más controles sobre la adecuación de los fondos para la apertura         
-      if(MxSmb[i].PLBuy>MxSmb[i].spreadbuy || MxSmb[i].PLSell>MxSmb[i].spreadsell)
+      if((MxSmb[i].PLBuy>MxSmb[i].spreadbuy || MxSmb[i].PLSell>MxSmb[i].spreadsell) && allowByIA)
         {
          // No me molesté con la dirección de la transacción, solo calculé el margen total para la compra, todavía es más alto que para la venta
          // También vale la pena prestar atención al coeficiente creciente
@@ -1138,6 +1273,7 @@ void fnCloseThree(stThree &MxSmb[],int i,int fh)
    if(MxSmb[i].smb1.tkt<=0 && MxSmb[i].smb2.tkt<=0 && MxSmb[i].smb3.tkt<=0)
      {
       fnControlFile(MxSmb,i,glFileLog);
+      fnUpdateAIScore(MxSmb,i);
       MxSmb[i].smb1.side=0;
       MxSmb[i].smb2.side=0;
       MxSmb[i].smb3.side=0;
@@ -1215,6 +1351,7 @@ void fnCmnt(stThree &MxSmb[],ushort lcOpenThree)
                             
    if((bool)MQLInfoInteger(MQL_TESTER)) txt="EA es una moneda múltiple y el modo de prueba no es compatible";
    Comment(txt);
+   fnDrawRightPanel(MxSmb,lcOpenThree);
   }
   
  
