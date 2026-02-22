@@ -293,6 +293,8 @@ void fnDeletePanel();
 void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree);
 int fnTFMinutes(ENUM_TIMEFRAMES tf);
 double fnSigmoid(double x);
+double fnEMAFromClose(string smb,ENUM_TIMEFRAMES tf,int period,int shift);
+double fnRSIFromClose(string smb,ENUM_TIMEFRAMES tf,int period,int shift);
 double fnCalcTDI(string smb,ENUM_TIMEFRAMES tf,int shift);
 bool fnBuildNNFeatures(string smb,ENUM_TIMEFRAMES tf,int shift,double spreadPts,double &x1,double &x2,double &x3,double &x4,double &x5);
 bool fnTrainNN90Days(stThree &MxSmb[]);
@@ -354,18 +356,47 @@ double fnSigmoid(double x)
    return(1.0/(1.0+MathExp(-x)));
   }
 
+double fnEMAFromClose(string smb,ENUM_TIMEFRAMES tf,int period,int shift)
+  {
+   if(period<=1) return(iClose(smb,tf,shift));
+   int warmup=period*4;
+   int startShift=shift+warmup;
+   double ema=iClose(smb,tf,startShift);
+   if(ema<=0) return(0.0);
+   double alpha=2.0/(period+1.0);
+   for(int sh=startShift-1;sh>=shift;sh--)
+     {
+      double c=iClose(smb,tf,sh);
+      if(c<=0) return(0.0);
+      ema=alpha*c+(1.0-alpha)*ema;
+     }
+   return(ema);
+  }
+
+double fnRSIFromClose(string smb,ENUM_TIMEFRAMES tf,int period,int shift)
+  {
+   double gain=0.0,loss=0.0;
+   for(int k=shift+period;k>shift;k--)
+     {
+      double c1=iClose(smb,tf,k-1);
+      double c0=iClose(smb,tf,k);
+      if(c1<=0 || c0<=0) return(50.0);
+      double d=c1-c0;
+      if(d>=0) gain+=d; else loss-=d;
+     }
+   if(loss<=0.0) return(100.0);
+   double rs=(gain/period)/(loss/period);
+   return(100.0-(100.0/(1.0+rs)));
+  }
+
 double fnCalcTDI(string smb,ENUM_TIMEFRAMES tf,int shift)
   {
-   double rsi=iRSI(smb,tf,13,PRICE_CLOSE,shift);
-   if(rsi==EMPTY_VALUE) return(0.0);
-
+   double rsi=fnRSIFromClose(smb,tf,13,shift);
    double sum=0.0;
    int n=0;
    for(int k=shift;k<shift+7;k++)
      {
-      double rv=iRSI(smb,tf,13,PRICE_CLOSE,k);
-      if(rv==EMPTY_VALUE) continue;
-      sum+=rv;
+      sum+=fnRSIFromClose(smb,tf,13,k);
       n++;
      }
    if(n<=0) return(0.0);
@@ -375,14 +406,14 @@ double fnCalcTDI(string smb,ENUM_TIMEFRAMES tf,int shift)
 
 bool fnBuildNNFeatures(string smb,ENUM_TIMEFRAMES tf,int shift,double spreadPts,double &x1,double &x2,double &x3,double &x4,double &x5)
   {
-   double p=MarketInfo(smb,MODE_POINT);
+   double p=SymbolInfoDouble(smb,SYMBOL_POINT);
    if(p<=0) p=0.0001;
 
-   double ema50=iMA(smb,tf,50,0,MODE_EMA,PRICE_CLOSE,shift);
-   double ema200=iMA(smb,tf,200,0,MODE_EMA,PRICE_CLOSE,shift);
-   double ema50prev=iMA(smb,tf,50,0,MODE_EMA,PRICE_CLOSE,shift+5);
-   double rsi=iRSI(smb,tf,13,PRICE_CLOSE,shift);
-   if(ema50==EMPTY_VALUE || ema200==EMPTY_VALUE || ema50prev==EMPTY_VALUE || rsi==EMPTY_VALUE) return(false);
+   double ema50=fnEMAFromClose(smb,tf,50,shift);
+   double ema200=fnEMAFromClose(smb,tf,200,shift);
+   double ema50prev=fnEMAFromClose(smb,tf,50,shift+5);
+   double rsi=fnRSIFromClose(smb,tf,13,shift);
+   if(ema50<=0 || ema200<=0 || ema50prev<=0) return(false);
 
    x1=fnClamp((ema50-ema200)/(50.0*p),-3.0,3.0);
    x2=fnClamp((ema50-ema50prev)/(10.0*p),-3.0,3.0);
@@ -409,7 +440,7 @@ bool fnTrainNN90Days(stThree &MxSmb[])
       for(int sh=maxShift;sh>=2;sh--)
         {
          double x1,x2,x3,x4,x5;
-         double spreadPts=MarketInfo(smb,MODE_SPREAD);
+         double spreadPts=(double)SymbolInfoInteger(smb,SYMBOL_SPREAD);
          if(!fnBuildNNFeatures(smb,inNNTimeframe,sh,spreadPts,x1,x2,x3,x4,x5)) continue;
 
          double c0=iClose(smb,inNNTimeframe,sh);
@@ -1119,10 +1150,10 @@ void fnCalcDelta(stThree &MxSmb[],double prft,string cmnt,int magic,double lot,u
         }
 
       // Red neuronal + filtros técnicos EMA50/200 y TDI + sesgo Market Maker
-      double spreadPts=MarketInfo(MxSmb[i].smb1.name,MODE_SPREAD);
+      double spreadPts=(double)SymbolInfoInteger(MxSmb[i].smb1.name,SYMBOL_SPREAD);
       MxSmb[i].nnProb=fnPredictNN(MxSmb[i].smb1.name,spreadPts);
-      double ema50Now=iMA(MxSmb[i].smb1.name,inNNTimeframe,50,0,MODE_EMA,PRICE_CLOSE,0);
-      double ema200Now=iMA(MxSmb[i].smb1.name,inNNTimeframe,200,0,MODE_EMA,PRICE_CLOSE,0);
+      double ema50Now=fnEMAFromClose(MxSmb[i].smb1.name,inNNTimeframe,50,0);
+      double ema200Now=fnEMAFromClose(MxSmb[i].smb1.name,inNNTimeframe,200,0);
       double tdiNow=fnCalcTDI(MxSmb[i].smb1.name,inNNTimeframe,0);
       MxSmb[i].mmBias=0;
       if(ema50Now>ema200Now && tdiNow>0) MxSmb[i].mmBias=1;
