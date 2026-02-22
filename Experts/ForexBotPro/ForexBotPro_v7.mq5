@@ -2097,7 +2097,9 @@ void CloseArbBasket(string reason)
       req.price=(req.type==ORDER_TYPE_BUY)?tick.ask:tick.bid;
       req.type_filling=ORDER_FILLING_FOK;
       req.comment="ArbClose "+reason;
-      OrderSend(req,res);
+      bool sent=OrderSend(req,res);
+      if(!sent || (res.retcode!=TRADE_RETCODE_DONE && res.retcode!=TRADE_RETCODE_PLACED))
+         Print("Arb close failed ", symbol, " reason=", reason, " rc=", res.retcode, " err=", GetLastError());
    }
    g_arbBasketOpen=false;
    g_arbDirection=0;
