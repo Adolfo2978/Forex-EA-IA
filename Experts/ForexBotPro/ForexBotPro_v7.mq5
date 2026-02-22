@@ -217,6 +217,16 @@ input string InpTelegramChatId = "7770112666";               // Telegram chat ID
 input string InpTelegramChannel = "Forex Bot Pro v7.1 | Señales Premium";
 input int InpTelegramUpdateSec = 300;              // Update interval (seconds)
 #include <ForexBotPro\TelegramNotifier.mqh>
+
+input group "┌─ STRATEGY 2: TRIANGULAR ARBITRAGE + IA"
+input bool InpEnableArbitrageStrategy = true;      // Enable secondary arbitrage strategy
+input string InpArbTriangle = "EURUSD,GBPUSD,EURGBP"; // Triangle symbols A,B,C
+input ulong InpArbMagicNumber = 223456;            // Magic number for arbitrage strategy
+input double InpArbBaseLot = 0.01;                 // Base lot for A and B legs
+input double InpArbMinEdgePips = 0.4;              // Min edge threshold (pips equivalent)
+input double InpArbTakeProfit = 2.0;               // Basket TP in account currency
+input double InpArbStopLoss = 4.0;                 // Basket SL in account currency
+input int InpArbMaxHoldSeconds = 120;              // Max basket hold time
 //+------------------------------------------------------------------+
 //| Global Variables                                                 |
 //+------------------------------------------------------------------+
@@ -246,6 +256,21 @@ string g_openedCharts[];
 int g_openedChartsCount = 0;
 ulong g_lastCheckedTickets[];
 int g_lastCheckedCount = 0;
+
+string g_arbSymA = "";
+string g_arbSymB = "";
+string g_arbSymC = "";
+bool g_arbBasketOpen = false;
+int g_arbDirection = 0; // 1 buy-cycle, -1 sell-cycle
+datetime g_arbOpenTime = 0;
+
+bool InitArbitrageStrategy();
+bool ParseArbTriangle(string tri,string &a,string &b,string &c);
+void ProcessArbitrageStrategy();
+bool HasArbPositions();
+double GetArbBasketProfit();
+void CloseArbBasket(string reason);
+bool SendArbOrder(string symbol, ENUM_ORDER_TYPE orderType, double lot, string comment);
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
@@ -334,6 +359,18 @@ int OnInit()
       Print("Symbol: ", _Symbol);
    }
    
+
+   // Ensure neural network is available for parallel arbitrage strategy in multi-pair mode
+   if(InpEnableArbitrageStrategy && InpMultiPairMode)
+   {
+      g_neuralNet.Init(_Symbol, InpPrimaryTF, InpGMTOffset);
+      if(InpUseNeuralNetwork && InpTrainNNOnInit)
+         g_neuralNet.TrainFromHistory(_Symbol, InpPrimaryTF, InpNNTrainDays, InpNNTrainEpochs,
+            InpNNTrainLearningRate, InpNNTargetAccuracy, InpNNTrainMaxEpochs, InpNNTrainMaxAttempts,
+            InpNNBalanceLabels, InpGMTOffset, InpFocusMondayAsia, InpAsiaStartHour, InpAsiaEndHour,
+            InpMondayAsiaWeight);
+   }
+
    // Initialize Market Maker
    if(InpUseMarketMaker)
    {
@@ -378,6 +415,8 @@ int OnInit()
       Print("Professional Dashboard: ACTIVADO");
    }
    
+   InitArbitrageStrategy();
+
    g_initialized = true;
    Print("=== Inicialización Completa ===");
    EventSetTimer(InpScanInterval);
@@ -457,6 +496,9 @@ void OnTick()
       }
    }
    
+   // Parallel secondary strategy: triangular arbitrage
+   ProcessArbitrageStrategy();
+
    // Single pair mode
    if(!InpMultiPairMode)
    {
@@ -1956,6 +1998,171 @@ double OnTester()
    
    return score;
 }
+
+
+bool ParseArbTriangle(string tri,string &a,string &b,string &c)
+{
+   string parts[];
+   int n=StringSplit(tri, ',', parts);
+   if(n<3) return false;
+   a=parts[0]; b=parts[1]; c=parts[2];
+   StringTrimLeft(a); StringTrimRight(a);
+   StringTrimLeft(b); StringTrimRight(b);
+   StringTrimLeft(c); StringTrimRight(c);
+   return (StringLen(a)>0 && StringLen(b)>0 && StringLen(c)>0);
+}
+
+bool InitArbitrageStrategy()
+{
+   if(!InpEnableArbitrageStrategy) return true;
+   if(!ParseArbTriangle(InpArbTriangle,g_arbSymA,g_arbSymB,g_arbSymC))
+   {
+      Print("ArbStrategy: invalid triangle config: ", InpArbTriangle);
+      return false;
+   }
+   Print("ArbStrategy initialized: ", g_arbSymA, " + ", g_arbSymB, " + ", g_arbSymC);
+   return true;
+}
+
+bool SendArbOrder(string symbol, ENUM_ORDER_TYPE orderType, double lot, string comment)
+{
+   MqlTick tk;
+   if(!SymbolInfoTick(symbol, tk)) return false;
+
+   MqlTradeRequest req; MqlTradeResult res;
+   ZeroMemory(req); ZeroMemory(res);
+   req.action = TRADE_ACTION_DEAL;
+   req.symbol = symbol;
+   req.volume = lot;
+   req.magic = InpArbMagicNumber;
+   req.deviation = 20;
+   req.comment = comment;
+   req.type = orderType;
+   req.price = (orderType==ORDER_TYPE_BUY)?tk.ask:tk.bid;
+   req.type_filling = ORDER_FILLING_FOK;
+
+   if(!OrderSend(req,res)) return false;
+   if(res.retcode!=TRADE_RETCODE_DONE && res.retcode!=TRADE_RETCODE_PLACED)
+   {
+      Print("Arb order failed ", symbol, " rc=", res.retcode);
+      return false;
+   }
+   return true;
+}
+
+bool HasArbPositions()
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong tk=PositionGetTicket(i);
+      if(!PositionSelectByTicket(tk)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)==InpArbMagicNumber) return true;
+   }
+   return false;
+}
+
+double GetArbBasketProfit()
+{
+   double pl=0.0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong tk=PositionGetTicket(i);
+      if(!PositionSelectByTicket(tk)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpArbMagicNumber) continue;
+      pl += PositionGetDouble(POSITION_PROFIT);
+   }
+   return pl;
+}
+
+void CloseArbBasket(string reason)
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong tk=PositionGetTicket(i);
+      if(!PositionSelectByTicket(tk)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpArbMagicNumber) continue;
+      string symbol=PositionGetString(POSITION_SYMBOL);
+      double vol=PositionGetDouble(POSITION_VOLUME);
+      ENUM_POSITION_TYPE pt=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      MqlTick tick; if(!SymbolInfoTick(symbol,tick)) continue;
+      MqlTradeRequest req; MqlTradeResult res;
+      ZeroMemory(req); ZeroMemory(res);
+      req.action=TRADE_ACTION_DEAL;
+      req.symbol=symbol;
+      req.volume=vol;
+      req.magic=InpArbMagicNumber;
+      req.deviation=20;
+      req.type=(pt==POSITION_TYPE_BUY)?ORDER_TYPE_SELL:ORDER_TYPE_BUY;
+      req.price=(req.type==ORDER_TYPE_BUY)?tick.ask:tick.bid;
+      req.type_filling=ORDER_FILLING_FOK;
+      req.comment="ArbClose "+reason;
+      OrderSend(req,res);
+   }
+   g_arbBasketOpen=false;
+   g_arbDirection=0;
+}
+
+void ProcessArbitrageStrategy()
+{
+   if(!InpEnableArbitrageStrategy) return;
+   if(g_arbSymA=="" || g_arbSymB=="" || g_arbSymC=="") return;
+
+   bool has=HasArbPositions();
+   if(has && !g_arbBasketOpen) g_arbBasketOpen=true;
+
+   if(g_arbBasketOpen)
+   {
+      double pl=GetArbBasketProfit();
+      if(pl>=InpArbTakeProfit) { CloseArbBasket("TP"); return; }
+      if(pl<=-InpArbStopLoss) { CloseArbBasket("SL"); return; }
+      if((TimeCurrent()-g_arbOpenTime) > InpArbMaxHoldSeconds) { CloseArbBasket("Timeout"); return; }
+      return;
+   }
+
+   MqlTick a,b,c;
+   if(!SymbolInfoTick(g_arbSymA,a) || !SymbolInfoTick(g_arbSymB,b) || !SymbolInfoTick(g_arbSymC,c)) return;
+   if(a.ask<=0 || b.ask<=0 || c.ask<=0) return;
+
+   double edgeBuy = (b.bid*c.bid - a.ask);
+   double edgeSell = (a.bid - b.ask*c.ask);
+   double pointA = SymbolInfoDouble(g_arbSymA,SYMBOL_POINT);
+   if(pointA<=0) return;
+   double edgePipsBuy = edgeBuy/pointA;
+   double edgePipsSell = edgeSell/pointA;
+
+   NNPrediction pred = g_neuralNet.Predict();
+   bool nnBuy = (!InpUseNeuralNetwork || pred.buyProb>=0.55);
+   bool nnSell = (!InpUseNeuralNetwork || pred.sellProb>=0.55);
+
+   if(edgePipsBuy>=InpArbMinEdgePips && nnBuy)
+   {
+      double lot3=NormalizeDouble(b.ask*InpArbBaseLot,2);
+      if(SendArbOrder(g_arbSymA,ORDER_TYPE_BUY,InpArbBaseLot,"ArbA Buy") &&
+         SendArbOrder(g_arbSymB,ORDER_TYPE_SELL,InpArbBaseLot,"ArbB Sell") &&
+         SendArbOrder(g_arbSymC,ORDER_TYPE_SELL,lot3,"ArbC Sell"))
+      {
+         g_arbBasketOpen=true;
+         g_arbDirection=1;
+         g_arbOpenTime=TimeCurrent();
+      }
+      else CloseArbBasket("PartialOpen");
+   }
+   else if(edgePipsSell>=InpArbMinEdgePips && nnSell)
+   {
+      double lot3=NormalizeDouble(b.ask*InpArbBaseLot,2);
+      if(SendArbOrder(g_arbSymA,ORDER_TYPE_SELL,InpArbBaseLot,"ArbA Sell") &&
+         SendArbOrder(g_arbSymB,ORDER_TYPE_BUY,InpArbBaseLot,"ArbB Buy") &&
+         SendArbOrder(g_arbSymC,ORDER_TYPE_BUY,lot3,"ArbC Buy"))
+      {
+         g_arbBasketOpen=true;
+         g_arbDirection=-1;
+         g_arbOpenTime=TimeCurrent();
+      }
+      else CloseArbBasket("PartialOpen");
+   }
+}
+
 //+------------------------------------------------------------------+
 //| END OF FOREXBOTPRO v7.1                                         |
 //+------------------------------------------------------------------+
