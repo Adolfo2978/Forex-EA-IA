@@ -49,12 +49,24 @@ input      int         inMagic=    300;        //EA number
 input      string      inCmnt=     "Arbitraje T ";       //Comment
 input      bool        inUseIA=    true;       // Activar filtro adaptativo (IA)
 input      double      inAIAgressividad=0.35;  // 0.0 a 1.0, sensibilidad del filtro IA
+input      bool        inUseNeuralNet=true;    // Activar red neuronal
+input      int         inNNTrainingDays=90;    // Días históricos para entrenamiento
+input      ENUM_TIMEFRAMES inNNTimeframe=PERIOD_M15; // Timeframe intradía
+input      int         inNNEpochs=4;           // Épocas de entrenamiento
+input      double      inNNLearningRate=0.03;  // Learning rate
+input      double      inNNBuyThreshold=0.56;  // Umbral probabilidad compra
+input      double      inNNSellThreshold=0.44; // Umbral probabilidad venta
+input      bool        inUseMMMethod=true;     // Filtro Market Maker
 
 
 int         glAccountsType=0; // tipo de cuenta. cobertura o red
 int         glFileLog=0;      // manejar el archivo de registro
 string      glPanelBgName="ARB_PANEL_BG";
 string      glPanelTextName="ARB_PANEL_TEXT";
+
+double      glNNWeights[6]={0.0,0.15,-0.08,0.12,0.10,-0.05};
+bool        glNNReady=false;
+datetime    glNNLastTrain=0;
 
 
 //+------------------------------------------------------------------+
@@ -103,6 +115,8 @@ int OnInit()
       fnCreateFileSymbols(MxThree,glFileLog);
 
    fnRestart(MxThree,inMagic);                     //restaurar triángulos después de reiniciar el robot
+   if(inUseNeuralNet)
+      fnTrainNN90Days(MxThree);
 
    if(ArraySize(MxThree)<=0)
      {
@@ -125,6 +139,8 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   if(inUseNeuralNet && (TimeCurrent()-glNNLastTrain)>43200)
+      fnTrainNN90Days(MxThree);
 
 // primero, cuente el número de triángulos abiertos. Esto ahorrará significativamente recursos de la computadora.
 // porque Si hay una restricción y la hemos alcanzado, entonces no consideramos el deslizamiento, etc.      
@@ -266,19 +282,24 @@ struct stThree
    uint              aiLosses;           // Cierres negativos
    double            aiConfidence;       // Confianza actual de señal [0..100]
    double            lastPL;             // Último resultado cerrado
-                     stThree(){status=0;magic=0;timeopen=0;aiScore=0;aiTrades=0;aiWins=0;aiLosses=0;aiConfidence=0;lastPL=0;}
+   double            nnProb;             // Probabilidad de red neuronal [0..1]
+   double            mmBias;             // Sesgo market maker (-1 sell, +1 buy)
+                     stThree(){status=0;magic=0;timeopen=0;aiScore=0;aiTrades=0;aiWins=0;aiLosses=0;aiConfidence=0;lastPL=0;nnProb=0.5;mmBias=0;}
   };
 
 double fnClamp(double val,double mn,double mx);
 void fnUpdateAIScore(stThree &MxSmb[],int idx);
 void fnDeletePanel();
 void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree);
+int fnTFMinutes(ENUM_TIMEFRAMES tf);
+double fnSigmoid(double x);
+double fnCalcTDI(string smb,ENUM_TIMEFRAMES tf,int shift);
+bool fnBuildNNFeatures(string smb,ENUM_TIMEFRAMES tf,int shift,double spreadPts,double &x1,double &x2,double &x3,double &x4,double &x5);
+bool fnTrainNN90Days(stThree &MxSmb[]);
+double fnPredictNN(string smb,double spreadPts);
 
-  // Modos de trabajo del EA  
-
-stThree  MxThree[];           // matriz principal donde se almacenan los triángulos de trabajo y todos los datos adicionales necesarios
-
-CSupport       csup;          // matriz principal donde se almacenan los triángulos de trabajo y todos los datos adicionales necesarios
+stThree  MxThree[];
+CSupport csup;
 
 double fnClamp(double val,double mn,double mx)
   {
@@ -290,7 +311,6 @@ double fnClamp(double val,double mn,double mx)
 void fnUpdateAIScore(stThree &MxSmb[],int idx)
   {
    if(idx<0 || idx>=ArraySize(MxSmb)) return;
-
    MxSmb[idx].aiTrades++;
    MxSmb[idx].lastPL=MxSmb[idx].pl;
 
@@ -302,7 +322,6 @@ void fnUpdateAIScore(stThree &MxSmb[],int idx)
      }
    else MxSmb[idx].aiLosses++;
 
-   // EMA simple como capa adaptativa de decisión
    MxSmb[idx].aiScore=0.85*MxSmb[idx].aiScore+0.15*outcome;
    MxSmb[idx].aiScore=fnClamp(MxSmb[idx].aiScore,-1.0,1.0);
   }
@@ -311,6 +330,119 @@ void fnDeletePanel()
   {
    ObjectDelete(0,glPanelBgName);
    ObjectDelete(0,glPanelTextName);
+  }
+
+int fnTFMinutes(ENUM_TIMEFRAMES tf)
+  {
+   switch(tf)
+     {
+      case PERIOD_M1: return 1;
+      case PERIOD_M5: return 5;
+      case PERIOD_M15: return 15;
+      case PERIOD_M30: return 30;
+      case PERIOD_H1: return 60;
+      case PERIOD_H4: return 240;
+      case PERIOD_D1: return 1440;
+      default: return 15;
+     }
+  }
+
+double fnSigmoid(double x)
+  {
+   if(x>35.0) return(1.0);
+   if(x<-35.0) return(0.0);
+   return(1.0/(1.0+MathExp(-x)));
+  }
+
+double fnCalcTDI(string smb,ENUM_TIMEFRAMES tf,int shift)
+  {
+   double rsi=iRSI(smb,tf,13,PRICE_CLOSE,shift);
+   if(rsi==EMPTY_VALUE) return(0.0);
+
+   double sum=0.0;
+   int n=0;
+   for(int k=shift;k<shift+7;k++)
+     {
+      double rv=iRSI(smb,tf,13,PRICE_CLOSE,k);
+      if(rv==EMPTY_VALUE) continue;
+      sum+=rv;
+      n++;
+     }
+   if(n<=0) return(0.0);
+   double signal=sum/n;
+   return((rsi-signal)/20.0);
+  }
+
+bool fnBuildNNFeatures(string smb,ENUM_TIMEFRAMES tf,int shift,double spreadPts,double &x1,double &x2,double &x3,double &x4,double &x5)
+  {
+   double p=MarketInfo(smb,MODE_POINT);
+   if(p<=0) p=0.0001;
+
+   double ema50=iMA(smb,tf,50,0,MODE_EMA,PRICE_CLOSE,shift);
+   double ema200=iMA(smb,tf,200,0,MODE_EMA,PRICE_CLOSE,shift);
+   double ema50prev=iMA(smb,tf,50,0,MODE_EMA,PRICE_CLOSE,shift+5);
+   double rsi=iRSI(smb,tf,13,PRICE_CLOSE,shift);
+   if(ema50==EMPTY_VALUE || ema200==EMPTY_VALUE || ema50prev==EMPTY_VALUE || rsi==EMPTY_VALUE) return(false);
+
+   x1=fnClamp((ema50-ema200)/(50.0*p),-3.0,3.0);
+   x2=fnClamp((ema50-ema50prev)/(10.0*p),-3.0,3.0);
+   x3=fnClamp((rsi-50.0)/25.0,-2.0,2.0);
+   x4=fnClamp(fnCalcTDI(smb,tf,shift),-2.0,2.0);
+   x5=fnClamp(spreadPts/50.0,0.0,2.0);
+   return(true);
+  }
+
+bool fnTrainNN90Days(stThree &MxSmb[])
+  {
+   if(ArraySize(MxSmb)<=0) return(false);
+   string smb=MxSmb[0].smb1.name;
+   if(smb=="" || !fnSmbCheck(smb)) return(false);
+
+   int tfMin=fnTFMinutes(inNNTimeframe);
+   int needBars=(inNNTrainingDays*1440)/MathMax(tfMin,1)+260;
+   int bars=iBars(smb,inNNTimeframe);
+   int maxShift=MathMin(bars-3,needBars);
+   if(maxShift<260) return(false);
+
+   for(int e=0;e<inNNEpochs;e++)
+     {
+      for(int sh=maxShift;sh>=2;sh--)
+        {
+         double x1,x2,x3,x4,x5;
+         double spreadPts=MarketInfo(smb,MODE_SPREAD);
+         if(!fnBuildNNFeatures(smb,inNNTimeframe,sh,spreadPts,x1,x2,x3,x4,x5)) continue;
+
+         double c0=iClose(smb,inNNTimeframe,sh);
+         double c1=iClose(smb,inNNTimeframe,sh-1);
+         if(c0==0 || c1==0) continue;
+
+         double y=(c1>c0)?1.0:0.0;
+         double z=glNNWeights[0]+glNNWeights[1]*x1+glNNWeights[2]*x2+glNNWeights[3]*x3+glNNWeights[4]*x4+glNNWeights[5]*x5;
+         double pred=fnSigmoid(z);
+         double err=(y-pred);
+
+         glNNWeights[0]+=inNNLearningRate*err;
+         glNNWeights[1]+=inNNLearningRate*err*x1;
+         glNNWeights[2]+=inNNLearningRate*err*x2;
+         glNNWeights[3]+=inNNLearningRate*err*x3;
+         glNNWeights[4]+=inNNLearningRate*err*x4;
+         glNNWeights[5]+=inNNLearningRate*err*x5;
+        }
+     }
+
+   glNNReady=true;
+   glNNLastTrain=TimeCurrent();
+   Print("NN entrenada con "+(string)inNNTrainingDays+" dias en "+smb+" TF "+EnumToString(inNNTimeframe));
+   return(true);
+  }
+
+double fnPredictNN(string smb,double spreadPts)
+  {
+   double x1,x2,x3,x4,x5;
+   if(!glNNReady) return(0.5);
+   if(!fnBuildNNFeatures(smb,inNNTimeframe,0,spreadPts,x1,x2,x3,x4,x5)) return(0.5);
+   double z=glNNWeights[0]+glNNWeights[1]*x1+glNNWeights[2]*x2+glNNWeights[3]*x3+glNNWeights[4]*x4+glNNWeights[5]*x5;
+   return(fnSigmoid(z));
   }
 
 void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
@@ -335,7 +467,6 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
          bestIdx=i;
         }
       if(MxSmb[i].status==2) openPL+=MxSmb[i].pl;
-
       avgScore+=MxSmb[i].aiScore;
       totalTrades+=MxSmb[i].aiTrades;
       totalWins+=MxSmb[i].aiWins;
@@ -347,6 +478,8 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
    txt+="P/L abierto: "+DoubleToString(openPL,2)+"\n";
    txt+="Score IA prom: "+DoubleToString(avgScore,3)+"\n";
    txt+="Trades IA: "+(string)totalTrades+" (W:"+(string)totalWins+" L:"+(string)totalLosses+")\n";
+   txt+="NN: "+(inUseNeuralNet?"ON":"OFF")+"  TF:"+EnumToString(inNNTimeframe)+"\n";
+   txt+="Ult. entrenamiento: "+(glNNLastTrain>0?TimeToString(glNNLastTrain,TIME_DATE|TIME_MINUTES):"N/A")+"\n";
 
    if(bestIdx>=0)
      {
@@ -356,11 +489,10 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
       txt+="PLBuy: "+DoubleToString(MxSmb[bestIdx].PLBuy,2)+" / Coste: "+DoubleToString(MxSmb[bestIdx].spreadbuy,2)+"\n";
       txt+="PLSell: "+DoubleToString(MxSmb[bestIdx].PLSell,2)+" / Coste: "+DoubleToString(MxSmb[bestIdx].spreadsell,2)+"\n";
       txt+="Confianza IA: "+DoubleToString(MxSmb[bestIdx].aiConfidence,1)+"%\n";
+      txt+="NN Prob: "+DoubleToString(MxSmb[bestIdx].nnProb*100.0,1)+"%  MM:"+DoubleToString(MxSmb[bestIdx].mmBias,0)+"\n";
      }
 
-   if(ObjectFind(0,glPanelBgName)<0)
-      ObjectCreate(0,glPanelBgName,OBJ_RECTANGLE_LABEL,0,0,0);
-
+   if(ObjectFind(0,glPanelBgName)<0) ObjectCreate(0,glPanelBgName,OBJ_RECTANGLE_LABEL,0,0,0);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_XDISTANCE,10);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_YDISTANCE,20);
@@ -370,9 +502,7 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
    ObjectSetInteger(0,glPanelBgName,OBJPROP_COLOR,clrBlack);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_BACK,false);
 
-   if(ObjectFind(0,glPanelTextName)<0)
-      ObjectCreate(0,glPanelTextName,OBJ_LABEL,0,0,0);
-
+   if(ObjectFind(0,glPanelTextName)<0) ObjectCreate(0,glPanelTextName,OBJ_LABEL,0,0,0);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_XDISTANCE,20);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_YDISTANCE,30);
@@ -382,10 +512,6 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
    ObjectSetString(0,glPanelTextName,OBJPROP_TEXT,txt);
   }
 
-
-//+------------------------------------------------------------------+
-//|                                                                  |
-//+------------------------------------------------------------------+
 void fnWarning(double lot,int &fh)
   {
 // Verifique la corrección de establecer el volumen de comercio, no podemos comerciar en volumen negativo
@@ -992,7 +1118,22 @@ void fnCalcDelta(stThree &MxSmb[],double prft,string cmnt,int magic,double lot,u
          allowByIA=(MxSmb[i].aiScore>=minScore && MxSmb[i].aiConfidence>=minConf);
         }
 
-      // Si hay ganancias potenciales, entonces es necesario realizar más controles sobre la adecuación de los fondos para la apertura         
+      // Red neuronal + filtros técnicos EMA50/200 y TDI + sesgo Market Maker
+      double spreadPts=MarketInfo(MxSmb[i].smb1.name,MODE_SPREAD);
+      MxSmb[i].nnProb=fnPredictNN(MxSmb[i].smb1.name,spreadPts);
+      double ema50Now=iMA(MxSmb[i].smb1.name,inNNTimeframe,50,0,MODE_EMA,PRICE_CLOSE,0);
+      double ema200Now=iMA(MxSmb[i].smb1.name,inNNTimeframe,200,0,MODE_EMA,PRICE_CLOSE,0);
+      double tdiNow=fnCalcTDI(MxSmb[i].smb1.name,inNNTimeframe,0);
+      MxSmb[i].mmBias=0;
+      if(ema50Now>ema200Now && tdiNow>0) MxSmb[i].mmBias=1;
+      if(ema50Now<ema200Now && tdiNow<0) MxSmb[i].mmBias=-1;
+
+      bool nnAllowBuy=(!inUseNeuralNet || (MxSmb[i].nnProb>=inNNBuyThreshold));
+      bool nnAllowSell=(!inUseNeuralNet || (MxSmb[i].nnProb<=inNNSellThreshold));
+      bool mmAllowBuy=(!inUseMMMethod || MxSmb[i].mmBias>=0);
+      bool mmAllowSell=(!inUseMMMethod || MxSmb[i].mmBias<=0);
+
+      // Si hay ganancias potenciales, entonces es necesario realizar más controles sobre la adecuación de los fondos para la apertura
       if((MxSmb[i].PLBuy>MxSmb[i].spreadbuy || MxSmb[i].PLSell>MxSmb[i].spreadsell) && allowByIA)
         {
          // No me molesté con la dirección de la transacción, solo calculé el margen total para la compra, todavía es más alto que para la venta
@@ -1021,7 +1162,7 @@ void fnCalcDelta(stThree &MxSmb[],double prft,string cmnt,int magic,double lot,u
         // Por defecto en la define MAXTIMEWAIT se pone el tiempo de espera hasta la apertura total en 3 segundos.
         // Si no nos hemos abierto durante este tiempo, enviamos lo que ha logrado abrirse para el cierre.
 
-         if(MxSmb[i].PLBuy>MxSmb[i].spreadbuy)
+         if(MxSmb[i].PLBuy>MxSmb[i].spreadbuy && nnAllowBuy && mmAllowBuy)
            {
             MxSmb[i].smb3.mrg=MarketInfo(MxSmb[i].smb3.name,MODE_MARGINREQUIRED)*MxSmb[i].smb3.lotbuy;
 
@@ -1030,7 +1171,7 @@ void fnCalcDelta(stThree &MxSmb[],double prft,string cmnt,int magic,double lot,u
            }
          else
 
-         if(MxSmb[i].PLSell>MxSmb[i].spreadsell)
+         if(MxSmb[i].PLSell>MxSmb[i].spreadsell && nnAllowSell && mmAllowSell)
            {
             MxSmb[i].smb3.mrg=MarketInfo(MxSmb[i].smb3.name,MODE_MARGINREQUIRED)*MxSmb[i].smb3.lotsell;
 
