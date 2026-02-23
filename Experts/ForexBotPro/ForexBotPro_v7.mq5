@@ -292,6 +292,28 @@ datetime g_lastRFIUpdate = 0;
 string g_rfiAlertKeys[];
 datetime g_rfiAlertTimes[];
 
+double ComputeATRFromPrices(string symbol, ENUM_TIMEFRAMES tf, int period, int shift)
+{
+   if(period<=1) period=14;
+   double sumTR=0.0;
+   int count=0;
+   for(int i=shift; i<shift+period; i++)
+   {
+      double h=iHigh(symbol,tf,i);
+      double l=iLow(symbol,tf,i);
+      double prevClose=iClose(symbol,tf,i+1);
+      if(h<=0 || l<=0 || prevClose<=0) continue;
+      double tr1=h-l;
+      double tr2=MathAbs(h-prevClose);
+      double tr3=MathAbs(l-prevClose);
+      double tr=MathMax(tr1, MathMax(tr2,tr3));
+      sumTR+=tr;
+      count++;
+   }
+   if(count<=0) return 0.0;
+   return sumTR/count;
+}
+
 bool ComputeRFILevels(string symbol, ENUM_TIMEFRAMES tf, int lookback, double minImpulseATR,
                       double &buyLow, double &buyHigh, double &sellLow, double &sellHigh,
                       bool &buyActive, bool &sellActive, datetime &buyStart, datetime &sellStart);
@@ -2221,7 +2243,7 @@ bool ComputeRFILevels(string symbol, ENUM_TIMEFRAMES tf, int lookback, double mi
    for(int i=1; i<=lookback; i++)
    {
       double o=iOpen(symbol, tf, i), c=iClose(symbol, tf, i), h=iHigh(symbol, tf, i), l=iLow(symbol, tf, i);
-      double atr=iATR(symbol, tf, 14, i);
+      double atr=ComputeATRFromPrices(symbol, tf, 14, i);
       if(o<=0 || c<=0 || h<=0 || l<=0 || atr<=0) continue;
       double body=MathAbs(c-o);
       if(c>o && body>=atr*minImpulseATR && body>bestBullBody)
