@@ -227,6 +227,19 @@ input double InpArbMinEdgePips = 0.4;              // Min edge threshold (pips e
 input double InpArbTakeProfit = 2.0;               // Basket TP in account currency
 input double InpArbStopLoss = 4.0;                 // Basket SL in account currency
 input int InpArbMaxHoldSeconds = 120;              // Max basket hold time
+
+input group "┌─ RFI AI SIMPLIFIED LAYER"
+input bool InpUseRFILayer = true;                  // Enable RFI zones overlay
+input ENUM_TIMEFRAMES InpRFITF = PERIOD_M15;      // Working TF for RFI zones
+input bool InpRFIUseMTF = true;                    // Show higher timeframe zones (MTF)
+input ENUM_TIMEFRAMES InpRFIHigherTF = PERIOD_H1;  // Higher TF for MTF mode
+input int InpRFIImpulseBars = 80;                  // Lookback bars for impulse detection
+input double InpRFIMinImpulseATR = 0.8;            // Min impulse size in ATR units
+input bool InpRFIEnableAlerts = true;              // Enable chart/sound/push alerts
+input bool InpRFIPlaySound = true;                 // Play sound alerts
+input bool InpRFIPush = false;                     // Send mobile notifications
+input string InpRFISoundFile = "alert2.wav";      // Alert sound file
+
 //+------------------------------------------------------------------+
 //| Global Variables                                                 |
 //+------------------------------------------------------------------+
@@ -271,6 +284,23 @@ bool HasArbPositions();
 double GetArbBasketProfit();
 void CloseArbBasket(string reason);
 bool SendArbOrder(string symbol, ENUM_ORDER_TYPE orderType, double lot, string comment);
+
+bool g_rfiShowHistory = false;
+bool g_rfiShowMTF2Start = true;
+bool g_rfiPanelVisible = true;
+datetime g_lastRFIUpdate = 0;
+string g_rfiAlertKeys[];
+datetime g_rfiAlertTimes[];
+
+bool ComputeRFILevels(string symbol, ENUM_TIMEFRAMES tf, int lookback, double minImpulseATR,
+                      double &buyLow, double &buyHigh, double &sellLow, double &sellHigh,
+                      bool &buyActive, bool &sellActive, datetime &buyStart, datetime &sellStart);
+void DrawRFIZones(string symbol, string prefix, ENUM_TIMEFRAMES tf,
+                  double buyLow, double buyHigh, double sellLow, double sellHigh,
+                  bool buyActive, bool sellActive, datetime buyStart, datetime sellStart);
+void UpdateRFILayer();
+void TriggerRFIAlert(string symbol, string side, double price, ENUM_TIMEFRAMES tf);
+void ClearRFIObjects();
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
@@ -405,7 +435,7 @@ int OnInit()
    }
    
    // Initialize Professional Dashboard
-   if(InpShowProfessionalDashboard)
+   if(InpShowProfessionalDashboard && g_rfiPanelVisible)
    {
       int dashboardX = -InpDashboardWidth;
       g_dashboard.Initialize(ChartID(), dashboardX, InpDashboardY, InpDashboardTheme);
@@ -429,7 +459,7 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    
-   if(InpShowProfessionalDashboard)
+   if(InpShowProfessionalDashboard && g_rfiPanelVisible)
    {
       g_dashboard.Cleanup();
       Print("Professional Dashboard: LIMPIADO");
@@ -440,6 +470,8 @@ void OnDeinit(const int reason)
    
    if(InpVisualPatterns)
       g_visualPatterns.ClearAllPatterns();
+
+   ClearRFIObjects();
    
    Print("=== Forex Bot Pro v7.1 Detenido ===");
    Print("Razón: ", reason);
@@ -496,6 +528,8 @@ void OnTick()
       }
    }
    
+   UpdateRFILayer();
+
    // Parallel secondary strategy: triangular arbitrage
    ProcessArbitrageStrategy();
 
@@ -1910,7 +1944,9 @@ void OnChartEvent(const int id, const long& lparam, const double& dparam, const 
    {
       if(lparam == 'R' || lparam == 'r')
       {
-         Print("Forzando escaneo manual...");
+         g_rfiShowHistory = !g_rfiShowHistory;
+         Print("RFI historial: ", (g_rfiShowHistory ? "ON" : "OFF"));
+         UpdateRFILayer();
          if(InpMultiPairMode)
          {
             g_scanner.ScanAll();
@@ -1921,17 +1957,18 @@ void OnChartEvent(const int id, const long& lparam, const double& dparam, const 
             AnalyzeAndTradeSingle();
          }
       }
-      else if(lparam == 'P' || lparam == 'p')
+      else if(lparam == 'Z' || lparam == 'z')
       {
-//          if(InpMultiPairMode)
-//          {
-//             static bool panelVisible = true;
-//             if(panelVisible)
-//                g_scanner.DeletePanel();
-//             else
-//                g_scanner.CreatePanel();
-//             panelVisible = !panelVisible;
-//          }
+         g_rfiPanelVisible = !g_rfiPanelVisible;
+         Print("Panel principal: ", (g_rfiPanelVisible ? "VISIBLE" : "OCULTO"));
+         if(!g_rfiPanelVisible && InpShowProfessionalDashboard)
+            g_dashboard.Cleanup();
+      }
+      else if(lparam == 'I' || lparam == 'i')
+      {
+         g_rfiShowMTF2Start = !g_rfiShowMTF2Start;
+         Print("RFI MTF-2 inicio: ", (g_rfiShowMTF2Start ? "ON" : "OFF"));
+         UpdateRFILayer();
       }
       else if(lparam == 'C' || lparam == 'c')
       {
@@ -2163,6 +2200,186 @@ void ProcessArbitrageStrategy()
       }
       else CloseArbBasket("PartialOpen");
    }
+}
+
+
+
+bool ComputeRFILevels(string symbol, ENUM_TIMEFRAMES tf, int lookback, double minImpulseATR,
+                      double &buyLow, double &buyHigh, double &sellLow, double &sellHigh,
+                      bool &buyActive, bool &sellActive, datetime &buyStart, datetime &sellStart)
+{
+   buyLow=0; buyHigh=0; sellLow=0; sellHigh=0;
+   buyActive=false; sellActive=false;
+   buyStart=0; sellStart=0;
+
+   int bars=iBars(symbol, tf);
+   if(bars<lookback+20) return false;
+
+   int bestBull=-1, bestBear=-1;
+   double bestBullBody=0.0, bestBearBody=0.0;
+
+   for(int i=1; i<=lookback; i++)
+   {
+      double o=iOpen(symbol, tf, i), c=iClose(symbol, tf, i), h=iHigh(symbol, tf, i), l=iLow(symbol, tf, i);
+      double atr=iATR(symbol, tf, 14, i);
+      if(o<=0 || c<=0 || h<=0 || l<=0 || atr<=0) continue;
+      double body=MathAbs(c-o);
+      if(c>o && body>=atr*minImpulseATR && body>bestBullBody)
+      {
+         bestBullBody=body;
+         bestBull=i;
+      }
+      if(c<o && body>=atr*minImpulseATR && body>bestBearBody)
+      {
+         bestBearBody=body;
+         bestBear=i;
+      }
+   }
+
+   if(bestBull>0)
+   {
+      double o=iOpen(symbol,tf,bestBull), c=iClose(symbol,tf,bestBull), l=iLow(symbol,tf,bestBull);
+      buyLow=l;
+      buyHigh=MathMin(o,c);
+      buyStart=iTime(symbol,tf,bestBull);
+   }
+   if(bestBear>0)
+   {
+      double o=iOpen(symbol,tf,bestBear), c=iClose(symbol,tf,bestBear), h=iHigh(symbol,tf,bestBear);
+      sellHigh=h;
+      sellLow=MathMax(o,c);
+      sellStart=iTime(symbol,tf,bestBear);
+   }
+
+   MqlTick tk;
+   if(!SymbolInfoTick(symbol,tk)) return true;
+   if(buyLow>0 && buyHigh>0 && tk.bid>=buyLow && tk.bid<=buyHigh) buyActive=true;
+   if(sellLow>0 && sellHigh>0 && tk.ask>=sellLow && tk.ask<=sellHigh) sellActive=true;
+   return true;
+}
+
+void DrawRFIZones(string symbol, string prefix, ENUM_TIMEFRAMES tf,
+                  double buyLow, double buyHigh, double sellLow, double sellHigh,
+                  bool buyActive, bool sellActive, datetime buyStart, datetime sellStart)
+{
+   int bars=iBars(symbol, tf);
+   if(bars<5) return;
+   datetime t1 = iTime(symbol, tf, MathMin(120, bars-1));
+   datetime t2 = TimeCurrent() + PeriodSeconds(tf) * 20;
+
+   string buyObj=prefix+"_BUY";
+   string sellObj=prefix+"_SELL";
+
+   if(buyLow>0 && buyHigh>0)
+   {
+      if(ObjectFind(0,buyObj)<0) ObjectCreate(0,buyObj,OBJ_RECTANGLE,0,t1,buyLow,t2,buyHigh);
+      ObjectSetInteger(0,buyObj,OBJPROP_COLOR, buyActive?clrLime:clrSeaGreen);
+      ObjectSetInteger(0,buyObj,OBJPROP_STYLE,STYLE_SOLID);
+      ObjectSetInteger(0,buyObj,OBJPROP_BACK,true);
+      ObjectSetInteger(0,buyObj,OBJPROP_FILL,true);
+      ObjectMove(0,buyObj,0,t1,buyLow);
+      ObjectMove(0,buyObj,1,t2,buyHigh);
+
+      string arr=prefix+"_BUY_ARROW";
+      if(ObjectFind(0,arr)<0) ObjectCreate(0,arr,OBJ_ARROW_UP,0,t2,buyLow);
+      ObjectMove(0,arr,0,t2,buyLow);
+      ObjectSetInteger(0,arr,OBJPROP_COLOR,buyActive?clrLime:clrGreen);
+
+      if(g_rfiShowMTF2Start && buyStart>0)
+      {
+         string st=prefix+"_BUY_START";
+         if(ObjectFind(0,st)<0) ObjectCreate(0,st,OBJ_ARROW,0,buyStart,buyHigh);
+         ObjectMove(0,st,0,buyStart,buyHigh);
+         ObjectSetInteger(0,st,OBJPROP_ARROWCODE,159);
+         ObjectSetInteger(0,st,OBJPROP_COLOR,clrAqua);
+      }
+   }
+
+   if(sellLow>0 && sellHigh>0)
+   {
+      if(ObjectFind(0,sellObj)<0) ObjectCreate(0,sellObj,OBJ_RECTANGLE,0,t1,sellLow,t2,sellHigh);
+      ObjectSetInteger(0,sellObj,OBJPROP_COLOR, sellActive?clrTomato:clrIndianRed);
+      ObjectSetInteger(0,sellObj,OBJPROP_STYLE,STYLE_SOLID);
+      ObjectSetInteger(0,sellObj,OBJPROP_BACK,true);
+      ObjectSetInteger(0,sellObj,OBJPROP_FILL,true);
+      ObjectMove(0,sellObj,0,t1,sellLow);
+      ObjectMove(0,sellObj,1,t2,sellHigh);
+
+      string arr=prefix+"_SELL_ARROW";
+      if(ObjectFind(0,arr)<0) ObjectCreate(0,arr,OBJ_ARROW_DOWN,0,t2,sellHigh);
+      ObjectMove(0,arr,0,t2,sellHigh);
+      ObjectSetInteger(0,arr,OBJPROP_COLOR,sellActive?clrTomato:clrRed);
+
+      if(g_rfiShowMTF2Start && sellStart>0)
+      {
+         string st=prefix+"_SELL_START";
+         if(ObjectFind(0,st)<0) ObjectCreate(0,st,OBJ_ARROW,0,sellStart,sellLow);
+         ObjectMove(0,st,0,sellStart,sellLow);
+         ObjectSetInteger(0,st,OBJPROP_ARROWCODE,159);
+         ObjectSetInteger(0,st,OBJPROP_COLOR,clrMagenta);
+      }
+   }
+}
+
+void TriggerRFIAlert(string symbol, string side, double price, ENUM_TIMEFRAMES tf)
+{
+   if(!InpRFIEnableAlerts) return;
+   string key=symbol+"|"+side+"|"+EnumToString(tf);
+   datetime now=TimeCurrent();
+
+   int idx=-1;
+   for(int i=0;i<ArraySize(g_rfiAlertKeys);i++) if(g_rfiAlertKeys[i]==key){idx=i;break;}
+   if(idx>=0 && (now-g_rfiAlertTimes[idx])<300) return;
+   if(idx<0)
+   {
+      int n=ArraySize(g_rfiAlertKeys);
+      ArrayResize(g_rfiAlertKeys,n+1);
+      ArrayResize(g_rfiAlertTimes,n+1);
+      idx=n;
+      g_rfiAlertKeys[idx]=key;
+   }
+   g_rfiAlertTimes[idx]=now;
+
+   string msg=StringFormat("RFI %s activo en %s (%s) @ %.5f", side, symbol, EnumToString(tf), price);
+   Alert(msg);
+   if(InpRFIPlaySound) PlaySound(InpRFISoundFile);
+   if(InpRFIPush) SendNotification(msg);
+}
+
+void UpdateRFILayer()
+{
+   if(!InpUseRFILayer) return;
+   if(TimeCurrent()-g_lastRFIUpdate < 3) return;
+   g_lastRFIUpdate = TimeCurrent();
+
+   int lookback = g_rfiShowHistory ? MathMax(InpRFIImpulseBars, 240) : InpRFIImpulseBars;
+   double bL,bH,sL,sH; bool bA,sA; datetime bS,sS;
+
+   if(ComputeRFILevels(_Symbol, InpRFITF, lookback, InpRFIMinImpulseATR, bL,bH,sL,sH,bA,sA,bS,sS))
+   {
+      DrawRFIZones(_Symbol, "RFI_MAIN", InpRFITF, bL,bH,sL,sH,bA,sA,bS,sS);
+      MqlTick tk; if(SymbolInfoTick(_Symbol,tk))
+      {
+         if(bA) TriggerRFIAlert(_Symbol, "BUY_ZONE", tk.bid, InpRFITF);
+         if(sA) TriggerRFIAlert(_Symbol, "SELL_ZONE", tk.ask, InpRFITF);
+      }
+   }
+
+   if(InpRFIUseMTF)
+   {
+      double mbL,mbH,msL,msH; bool mbA,msA; datetime mbS,msS;
+      if(ComputeRFILevels(_Symbol, InpRFIHigherTF, lookback, InpRFIMinImpulseATR, mbL,mbH,msL,msH,mbA,msA,mbS,msS))
+         DrawRFIZones(_Symbol, "RFI_MTF", InpRFIHigherTF, mbL,mbH,msL,msH,mbA,msA,mbS,msS);
+   }
+}
+
+void ClearRFIObjects()
+{
+   string objs[] = {
+      "RFI_MAIN_BUY","RFI_MAIN_SELL","RFI_MAIN_BUY_ARROW","RFI_MAIN_SELL_ARROW","RFI_MAIN_BUY_START","RFI_MAIN_SELL_START",
+      "RFI_MTF_BUY","RFI_MTF_SELL","RFI_MTF_BUY_ARROW","RFI_MTF_SELL_ARROW","RFI_MTF_BUY_START","RFI_MTF_SELL_START"
+   };
+   for(int i=0;i<ArraySize(objs);i++) ObjectDelete(0, objs[i]);
 }
 
 //+------------------------------------------------------------------+
