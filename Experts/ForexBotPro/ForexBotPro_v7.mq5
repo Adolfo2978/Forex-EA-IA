@@ -55,6 +55,7 @@ input ENUM_TIMEFRAMES InpSecondaryTF = PERIOD_H1; // Secondary timeframe (MTF)
 input bool InpUseH1TrendFilter = true;
 input double InpSLTightenOnH1Align = 0.85;
 input int InpScanInterval = 60;                    // Scanner interval (seconds)
+input int InpScannerBatchSize = 4;                 // Symbols processed per timer cycle (0=all)
 input int InpGMTOffset = 0;                        // GMT offset for session detection
 input group "┌─ TRADING MODE"
 input bool InpMultiPairMode = true;                // Enable multi-pair scanning
@@ -179,10 +180,20 @@ input int InpDashboardX = -510;                    // X position (negative = fro
 input int InpDashboardY = 30;                      // Y position
 input int InpDashboardWidth = 300;                 // Width (pixels)
 input int InpDashboardHeight = 520;                // Height (pixels)
+input bool InpShowScannerLeftPanel = true;        // Left panel with pairs + IA/Technical/Total
+input bool InpShowLiveBlockDiagnostics = true;     // Show live block counters on left panel
 input bool InpShowPerfSection = true;              // Show performance metrics
 input bool InpShowTradingSection = true;           // Show trading status
 input bool InpShowStatsSection = true;             // Show cumulative statistics
 input int InpDashboardRefreshMs = 500;             // Refresh rate (milliseconds)
+input group "┌─ INTRADAY SIGNAL QUALITY"
+input bool InpEnableIntradaySignalQuota = true;    // Limit intraday entries per day
+input int InpMaxIntradaySignalsPerDay = 3;         // Max approved entries per day
+input int InpMinMinutesBetweenSignals = 90;        // Minimum minutes between entries
+input bool InpAdaptiveConfidenceThreshold = true;   // Dynamically relax strict confidence filter
+input double InpMaxConfidenceRelaxation = 8.0;      // Max confidence reduction in low volatility
+input double InpVolatilityReferenceATRPercent = 0.0012; // ATR/price reference for threshold tuning
+input bool InpBypassLegacyHardFilters = true;       // Ignore deprecated hard filters by default
 //+------------------------------------------------------------------+
 //| DEPRECATED PARAMETERS (Legacy Support)                          |
 //+------------------------------------------------------------------+
@@ -246,6 +257,179 @@ string g_openedCharts[];
 int g_openedChartsCount = 0;
 ulong g_lastCheckedTickets[];
 int g_lastCheckedCount = 0;
+int g_todaySignalCount = 0;
+int g_signalCountDayKey = -1;
+datetime g_lastSignalTime = 0;
+int g_blockSpread = 0, g_blockMTF = 0, g_blockKillZone = 0, g_blockIA = 0, g_blockSimilarity = 0;
+int g_blockQuota = 0, g_blockConfidence = 0, g_blockMaxPos = 0, g_blockHasPos = 0, g_blockOther = 0;
+
+int BuildDayKey(datetime value)
+{
+   MqlDateTime dt;
+   TimeToStruct(value, dt);
+   return dt.year * 10000 + dt.mon * 100 + dt.day;
+}
+
+void ResetIntradaySignalCounterIfNeeded()
+{
+   int currentDayKey = BuildDayKey(TimeCurrent());
+   if(currentDayKey != g_signalCountDayKey)
+   {
+      g_signalCountDayKey = currentDayKey;
+      g_todaySignalCount = 0;
+      g_lastSignalTime = 0;
+      ResetBlockCounters();
+      Print("[INTRADAY] Nuevo día detectado. Contador reiniciado.");
+   }
+}
+
+bool CanOpenNewIntradaySignal(string symbol)
+{
+   if(!InpEnableIntradaySignalQuota)
+      return true;
+
+   ResetIntradaySignalCounterIfNeeded();
+
+   if(g_todaySignalCount >= InpMaxIntradaySignalsPerDay)
+   {
+      LogBlock(symbol, "cupo diario de señales agotado");
+      return false;
+   }
+
+   if(g_lastSignalTime > 0)
+   {
+      int elapsedMinutes = (int)((TimeCurrent() - g_lastSignalTime) / 60);
+      if(elapsedMinutes < InpMinMinutesBetweenSignals)
+      {
+         LogBlock(symbol, "esperando separación mínima entre señales");
+         return false;
+      }
+   }
+
+   return true;
+}
+
+void RegisterIntradaySignalExecution(string symbol)
+{
+   if(!InpEnableIntradaySignalQuota)
+      return;
+
+   ResetIntradaySignalCounterIfNeeded();
+   g_todaySignalCount++;
+   g_lastSignalTime = TimeCurrent();
+
+   Print("[INTRADAY] Señal ejecutada en ", symbol,
+      " | Señales del día: ", g_todaySignalCount, "/", InpMaxIntradaySignalsPerDay);
+}
+
+
+
+double GetAdaptiveConfidenceThreshold(string symbol)
+{
+   double threshold = InpMinConfidenceLevel;
+   if(!InpAdaptiveConfidenceThreshold)
+      return threshold;
+
+   int atrHandle = iATR(symbol, InpPrimaryTF, 14);
+   if(atrHandle == INVALID_HANDLE)
+      return threshold;
+
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   int copied = CopyBuffer(atrHandle, 0, 0, 1, atrBuf);
+   IndicatorRelease(atrHandle);
+   if(copied < 1 || atrBuf[0] <= 0)
+      return threshold;
+
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   if(bid <= 0)
+      bid = SymbolInfoDouble(symbol, SYMBOL_LAST);
+   if(bid <= 0)
+      return threshold;
+
+   double atrPercent = atrBuf[0] / bid;
+   double relax = 0.0;
+   if(atrPercent < InpVolatilityReferenceATRPercent)
+   {
+      double deficit = (InpVolatilityReferenceATRPercent - atrPercent) / InpVolatilityReferenceATRPercent;
+      relax = MathMin(InpMaxConfidenceRelaxation, deficit * InpMaxConfidenceRelaxation);
+   }
+
+   return MathMax(55.0, threshold - relax);
+}
+
+
+void ResetBlockCounters()
+{
+   g_blockSpread = 0;
+   g_blockMTF = 0;
+   g_blockKillZone = 0;
+   g_blockIA = 0;
+   g_blockSimilarity = 0;
+   g_blockQuota = 0;
+   g_blockConfidence = 0;
+   g_blockMaxPos = 0;
+   g_blockHasPos = 0;
+   g_blockOther = 0;
+}
+
+void RegisterBlockReason(string reason)
+{
+   string r = reason;
+   StringToLower(r);
+   if(StringFind(r, "spread") >= 0)
+      g_blockSpread++;
+   else if(StringFind(r, "mtf") >= 0)
+      g_blockMTF++;
+   else if(StringFind(r, "kill zone") >= 0)
+      g_blockKillZone++;
+   else if(StringFind(r, "ia") >= 0)
+      g_blockIA++;
+   else if(StringFind(r, "similitud") >= 0)
+      g_blockSimilarity++;
+   else if(StringFind(r, "cupo") >= 0 || StringFind(r, "separación") >= 0)
+      g_blockQuota++;
+   else if(StringFind(r, "confianza") >= 0)
+      g_blockConfidence++;
+   else if(StringFind(r, "max posiciones") >= 0)
+      g_blockMaxPos++;
+   else if(StringFind(r, "ya hay posicion") >= 0)
+      g_blockHasPos++;
+   else
+      g_blockOther++;
+}
+
+string GetBlockDiagnosticsText()
+{
+   return StringFormat("Spr:%d MTF:%d KZ:%d IA:%d Sim:%d Cupo:%d Conf:%d Max:%d Has:%d O:%d",
+      g_blockSpread, g_blockMTF, g_blockKillZone, g_blockIA, g_blockSimilarity,
+      g_blockQuota, g_blockConfidence, g_blockMaxPos, g_blockHasPos, g_blockOther);
+}
+
+void CleanupLegacyDashboardObjects(long chartId)
+{
+   string legacyPrefixes[] =
+   {
+      "FOREXBOTPRO_DASHBOARD_",
+      "FOREXBOTPRO_DASHBOARD_LEFT_",
+      "FOREXBOTPRO_DASHBOARD_RIGHT_"
+   };
+
+   int total = ObjectsTotal(chartId, 0, -1);
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(chartId, i, 0);
+      for(int p = 0; p < ArraySize(legacyPrefixes); p++)
+      {
+         if(StringFind(objName, legacyPrefixes[p]) == 0)
+         {
+            ObjectDelete(chartId, objName);
+            break;
+         }
+      }
+   }
+}
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
@@ -285,7 +469,9 @@ int OnInit()
    // Initialize Multi-Pair Scanner
    if(InpMultiPairMode)
    {
-      g_scanner.Init(InpPrimaryTF, InpSecondaryTF, InpMinConfidenceLevel);
+      double scannerMinConf = InpAdaptiveConfidenceThreshold ? MathMax(55.0, InpMinConfidenceLevel - InpMaxConfidenceRelaxation) : InpMinConfidenceLevel;
+      g_scanner.Init(InpPrimaryTF, InpSecondaryTF, scannerMinConf);
+      g_scanner.SetScanBatchSize(InpScannerBatchSize);
       g_scanner.SetMagicNumber(InpMagicNumber);
       g_scanner.SetMarketMakerParams(InpUseMarketMaker, InpMMWeight, InpGMTOffset);
       
@@ -311,8 +497,8 @@ int OnInit()
          }
       }
       
-//       if(InpShowPanel)
-//          g_scanner.CreatePanel();
+      if(InpShowScannerLeftPanel)
+         g_scanner.CreatePanel();
       
       Print("Scanner inicializado con ", g_scanner.GetSymbolCount(), " pares");
    }
@@ -367,17 +553,23 @@ int OnInit()
       Print("Telegram Notificaciones: ACTIVADO");
    }
    
+   // Cleanup old/legacy dashboard objects from previous versions
+   CleanupLegacyDashboardObjects(ChartID());
+
    // Initialize Professional Dashboard
    if(InpShowProfessionalDashboard)
    {
-      int dashboardX = -InpDashboardWidth;
+      int dashboardX = InpDashboardX;
+      g_dashboard.SetPanelName("FOREXBOTPRO_DASHBOARD_RIGHT");
       g_dashboard.Initialize(ChartID(), dashboardX, InpDashboardY, InpDashboardTheme);
       g_dashboard.SetSize(InpDashboardWidth, InpDashboardHeight);
       g_dashboard.SetSections(InpShowPerfSection, InpShowTradingSection, InpShowStatsSection);
       g_dashboard.SetUpdateInterval(InpDashboardRefreshMs);
-      Print("Professional Dashboard: ACTIVADO");
+      Print("Professional Dashboard: ACTIVADO (R)");
    }
    
+   ResetIntradaySignalCounterIfNeeded();
+   ResetBlockCounters();
    g_initialized = true;
    Print("=== Inicialización Completa ===");
    EventSetTimer(InpScanInterval);
@@ -393,11 +585,12 @@ void OnDeinit(const int reason)
    if(InpShowProfessionalDashboard)
    {
       g_dashboard.Cleanup();
+      CleanupLegacyDashboardObjects(ChartID());
       Print("Professional Dashboard: LIMPIADO");
    }
    
-   if(InpMultiPairMode)
-//       g_scanner.DeletePanel();
+   if(InpMultiPairMode && InpShowScannerLeftPanel)
+      g_scanner.DeletePanel();
    
    if(InpVisualPatterns)
       g_visualPatterns.ClearAllPatterns();
@@ -448,7 +641,7 @@ void OnTick()
          g_dashboard.RecalculatePosition();
          lastChartWidth = currentChartWidth;
       }
-      
+
       if(g_dashboard.NeedsUpdate())
       {
          UpdateProfessionalDashboard();
@@ -484,6 +677,8 @@ void OnTimer()
    if(InpMultiPairMode)
    {
       g_scanner.ScanAll();
+      if(InpShowLiveBlockDiagnostics && InpShowScannerLeftPanel)
+         g_scanner.SetDiagnosticsText(GetBlockDiagnosticsText());
       PrintScanResults();
       RefreshMonitoredPositionScores();
       
@@ -643,6 +838,10 @@ void HandleFridayClose()
 //+------------------------------------------------------------------+
 void LogBlock(string context, string reason)
 {
+   RegisterBlockReason(reason);
+   if(InpShowLiveBlockDiagnostics && InpMultiPairMode && InpShowScannerLeftPanel)
+      g_scanner.SetDiagnosticsText(GetBlockDiagnosticsText());
+
    if(!InpDebugMode) return;
    Print("[BLOCK] ", context, ": ", reason);
 }
@@ -886,10 +1085,11 @@ void AnalyzeAndTradeSingle()
       }
    }
    
-   // Check minimum confidence
-   if(combinedConfidence < InpMinConfidenceLevel)
+   // Check minimum confidence (adaptive threshold)
+   double adaptiveThreshold = GetAdaptiveConfidenceThreshold(_Symbol);
+   if(combinedConfidence < adaptiveThreshold)
    {
-      Print("Confianza insuficiente: ", DoubleToString(combinedConfidence, 1), "% < ", InpMinConfidenceLevel, "%");
+      Print("Confianza insuficiente: ", DoubleToString(combinedConfidence, 1), "% < ", DoubleToString(adaptiveThreshold, 1), "%");
       LogBlock(_Symbol, "confianza baja");
       return;
    }
@@ -902,7 +1102,7 @@ void AnalyzeAndTradeSingle()
    }
    
    // Check EMA alignment
-   if(InpRequireEMAAlignment)
+   if(!InpBypassLegacyHardFilters && InpRequireEMAAlignment)
    {
       if(technicalSignal == SIGNAL_BUY || technicalSignal == SIGNAL_STRONG_BUY)
       {
@@ -925,7 +1125,7 @@ void AnalyzeAndTradeSingle()
    }
    
    // Check MTF alignment
-   if(InpRequireMTFAlignment && !g_alignment.CheckMTFAlignment())
+   if(!InpBypassLegacyHardFilters && InpRequireMTFAlignment && !g_alignment.CheckMTFAlignment())
    {
       Print("MTF no alineado - Señal descartada");
       LogBlock(_Symbol, "mtf requerido");
@@ -971,12 +1171,16 @@ void AnalyzeAndTradeSingle()
    if(InpSecondaryTF == PERIOD_H1 && mtfAligned)
       slMultiplier = InpSLTightenOnH1Align;
    
+   if(!CanOpenNewIntradaySignal(_Symbol))
+      return;
+
    // Open position
    ulong ticket = g_positionManager.OpenPosition(_Symbol, finalSignal, combinedConfidence,
       killZoneNum, beeKayLevelNum, dayCycleNum, patternTargetPrice, slMultiplier);
    
    if(ticket > 0)
    {
+      RegisterIntradaySignalExecution(_Symbol);
       Print("Orden ejecutada - Ticket: ", ticket);
       
       ENUM_POSITION_TYPE posType = (finalSignal == SIGNAL_BUY || finalSignal == SIGNAL_STRONG_BUY ||
@@ -1079,7 +1283,8 @@ void ProcessMultiPairSignals()
    }
    
    PairAnalysis best = g_scanner.GetBestSignal();
-   if(best.combinedScore >= InpMinConfidenceLevel && best.signal != SIGNAL_NEUTRAL)
+   double adaptiveThreshold = (best.symbol != "") ? GetAdaptiveConfidenceThreshold(best.symbol) : InpMinConfidenceLevel;
+   if(best.symbol != "" && best.signal != SIGNAL_NEUTRAL)
    {
       if(!CheckTradingConditions(best.symbol))
          return;
@@ -1132,6 +1337,12 @@ void ProcessMultiPairSignals()
          }
          adjustedScore = g_adaptiveLearning.ApplyAdaptiveBias(adjustedScore);
       }
+
+      if(adjustedScore < adaptiveThreshold)
+      {
+         LogBlock(best.symbol, "confianza baja tras ajustes");
+         return;
+      }
       
       Print("=== EJECUTANDO TRADE EN ", best.symbol, " ===");
       Print("Señal: ", EnumToString(best.signal));
@@ -1163,11 +1374,15 @@ void ProcessMultiPairSignals()
       if(InpSecondaryTF == PERIOD_H1 && best.mtfStatus == "OK")
          slMultiplier = InpSLTightenOnH1Align;
       
+      if(!CanOpenNewIntradaySignal(best.symbol))
+         return;
+
       ulong ticket = g_positionManager.OpenPosition(best.symbol, best.signal, adjustedScore,
          killZoneNum, beeKayLevelNum, dayCycleNum, 0.0, slMultiplier);
       
       if(ticket > 0)
       {
+         RegisterIntradaySignalExecution(best.symbol);
          Print("Orden ejecutada - Ticket: ", ticket);
          
          ENUM_POSITION_TYPE posType = (best.signal == SIGNAL_BUY || best.signal == SIGNAL_STRONG_BUY ||
@@ -1234,7 +1449,7 @@ void ProcessMultiPairSignals()
       if(InpDebugMode)
       {
          Print("[BLOCK] MULTI: sin señal | score=", DoubleToString(best.combinedScore, 1),
-            " | signal=", EnumToString(best.signal));
+            " | min=", DoubleToString(adaptiveThreshold, 1), " | signal=", EnumToString(best.signal));
       }
    }
 }
@@ -1872,6 +2087,8 @@ void OnChartEvent(const int id, const long& lparam, const double& dparam, const 
          if(InpMultiPairMode)
          {
             g_scanner.ScanAll();
+            if(InpShowLiveBlockDiagnostics && InpShowScannerLeftPanel)
+               g_scanner.SetDiagnosticsText(GetBlockDiagnosticsText());
             PrintScanResults();
          }
          else
