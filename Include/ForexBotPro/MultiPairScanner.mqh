@@ -76,6 +76,7 @@ private:
    bool m_isScanning;
    int m_scanBatchSize;
    int m_nextScanStart;
+   string m_diagnosticsText;
    
 public:
    CMultiPairScanner()
@@ -97,6 +98,7 @@ public:
       m_isScanning = false;
       m_scanBatchSize = 0;
       m_nextScanStart = 0;
+      m_diagnosticsText = "";
       m_useMarketMaker = true;
       m_mmWeight = 0.25;
       m_gmtOffset = 0;
@@ -123,6 +125,7 @@ public:
    
    void SetMagicNumber(ulong magic) { m_magicNumber = magic; }
    void SetScanBatchSize(int batchSize) { m_scanBatchSize = MathMax(0, batchSize); }
+   void SetDiagnosticsText(string text) { m_diagnosticsText = text; }
    
    bool AddSymbol(string symbol)
    {
@@ -232,10 +235,12 @@ public:
          m_nextScanStart = end;
          if(m_nextScanStart >= m_symbolCount)
             m_nextScanStart = 0;
+      m_diagnosticsText = "";
       }
       else
       {
          m_nextScanStart = 0;
+      m_diagnosticsText = "";
       }
 
       UpdatePanel();
@@ -474,7 +479,7 @@ public:
       int valueWidth = MathMax(40, (contentWidth - symbolWidth) / 3);
       m_colWidth = valueWidth;
       int totalWidth = m_panelWidth;
-      int totalHeight = headerHeight + headerRowHeight + visibleRows * m_rowHeight + 30;
+      int totalHeight = headerHeight + headerRowHeight + visibleRows * m_rowHeight + 54;
       
       long chartWidth = ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
       long chartHeight = ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
@@ -574,6 +579,13 @@ public:
                      DoubleToString(m_analysis[i].combinedScore, 0), 
                      GetCombinedColor(m_analysis[i].combinedScore), 9);
       }
+
+      int diagY = startY + visibleRows * m_rowHeight + 4;
+      CreateLabel("FBP_DiagTitle", m_panelX + panelPadding, diagY,
+                  "BLOCK REASONS", C'255,200,80', 8);
+      CreateLabel("FBP_DiagText", m_panelX + panelPadding + 92, diagY,
+                  m_diagnosticsText == "" ? "-" : m_diagnosticsText,
+                  C'170,185,205', 8);
       
       int btnW = 120;
       int btnH = 24;

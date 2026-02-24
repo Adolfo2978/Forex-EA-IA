@@ -181,6 +181,7 @@ input int InpDashboardY = 30;                      // Y position
 input int InpDashboardWidth = 300;                 // Width (pixels)
 input int InpDashboardHeight = 520;                // Height (pixels)
 input bool InpShowScannerLeftPanel = true;        // Left panel with pairs + IA/Technical/Total
+input bool InpShowLiveBlockDiagnostics = true;     // Show live block counters on left panel
 input bool InpShowPerfSection = true;              // Show performance metrics
 input bool InpShowTradingSection = true;           // Show trading status
 input bool InpShowStatsSection = true;             // Show cumulative statistics
@@ -259,6 +260,8 @@ int g_lastCheckedCount = 0;
 int g_todaySignalCount = 0;
 int g_signalCountDayKey = -1;
 datetime g_lastSignalTime = 0;
+int g_blockSpread = 0, g_blockMTF = 0, g_blockKillZone = 0, g_blockIA = 0, g_blockSimilarity = 0;
+int g_blockQuota = 0, g_blockConfidence = 0, g_blockMaxPos = 0, g_blockHasPos = 0, g_blockOther = 0;
 
 int BuildDayKey(datetime value)
 {
@@ -275,6 +278,7 @@ void ResetIntradaySignalCounterIfNeeded()
       g_signalCountDayKey = currentDayKey;
       g_todaySignalCount = 0;
       g_lastSignalTime = 0;
+      ResetBlockCounters();
       Print("[INTRADAY] Nuevo día detectado. Contador reiniciado.");
    }
 }
@@ -352,6 +356,53 @@ double GetAdaptiveConfidenceThreshold(string symbol)
    }
 
    return MathMax(55.0, threshold - relax);
+}
+
+
+void ResetBlockCounters()
+{
+   g_blockSpread = 0;
+   g_blockMTF = 0;
+   g_blockKillZone = 0;
+   g_blockIA = 0;
+   g_blockSimilarity = 0;
+   g_blockQuota = 0;
+   g_blockConfidence = 0;
+   g_blockMaxPos = 0;
+   g_blockHasPos = 0;
+   g_blockOther = 0;
+}
+
+void RegisterBlockReason(string reason)
+{
+   string r = StringToLower(reason);
+   if(StringFind(r, "spread") >= 0)
+      g_blockSpread++;
+   else if(StringFind(r, "mtf") >= 0)
+      g_blockMTF++;
+   else if(StringFind(r, "kill zone") >= 0)
+      g_blockKillZone++;
+   else if(StringFind(r, "ia") >= 0)
+      g_blockIA++;
+   else if(StringFind(r, "similitud") >= 0)
+      g_blockSimilarity++;
+   else if(StringFind(r, "cupo") >= 0 || StringFind(r, "separación") >= 0)
+      g_blockQuota++;
+   else if(StringFind(r, "confianza") >= 0)
+      g_blockConfidence++;
+   else if(StringFind(r, "max posiciones") >= 0)
+      g_blockMaxPos++;
+   else if(StringFind(r, "ya hay posicion") >= 0)
+      g_blockHasPos++;
+   else
+      g_blockOther++;
+}
+
+string GetBlockDiagnosticsText()
+{
+   return StringFormat("Spr:%d MTF:%d KZ:%d IA:%d Sim:%d Cupo:%d Conf:%d Max:%d Has:%d O:%d",
+      g_blockSpread, g_blockMTF, g_blockKillZone, g_blockIA, g_blockSimilarity,
+      g_blockQuota, g_blockConfidence, g_blockMaxPos, g_blockHasPos, g_blockOther);
 }
 
 void CleanupLegacyDashboardObjects(long chartId)
@@ -517,6 +568,7 @@ int OnInit()
    }
    
    ResetIntradaySignalCounterIfNeeded();
+   ResetBlockCounters();
    g_initialized = true;
    Print("=== Inicialización Completa ===");
    EventSetTimer(InpScanInterval);
@@ -624,6 +676,8 @@ void OnTimer()
    if(InpMultiPairMode)
    {
       g_scanner.ScanAll();
+      if(InpShowLiveBlockDiagnostics && InpShowScannerLeftPanel)
+         g_scanner.SetDiagnosticsText(GetBlockDiagnosticsText());
       PrintScanResults();
       RefreshMonitoredPositionScores();
       
@@ -783,6 +837,10 @@ void HandleFridayClose()
 //+------------------------------------------------------------------+
 void LogBlock(string context, string reason)
 {
+   RegisterBlockReason(reason);
+   if(InpShowLiveBlockDiagnostics && InpMultiPairMode && InpShowScannerLeftPanel)
+      g_scanner.SetDiagnosticsText(GetBlockDiagnosticsText());
+
    if(!InpDebugMode) return;
    Print("[BLOCK] ", context, ": ", reason);
 }
@@ -2028,6 +2086,8 @@ void OnChartEvent(const int id, const long& lparam, const double& dparam, const 
          if(InpMultiPairMode)
          {
             g_scanner.ScanAll();
+            if(InpShowLiveBlockDiagnostics && InpShowScannerLeftPanel)
+               g_scanner.SetDiagnosticsText(GetBlockDiagnosticsText());
             PrintScanResults();
          }
          else
