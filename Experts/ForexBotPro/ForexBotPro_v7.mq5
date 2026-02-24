@@ -1225,7 +1225,7 @@ void ProcessMultiPairSignals()
    
    PairAnalysis best = g_scanner.GetBestSignal();
    double adaptiveThreshold = (best.symbol != "") ? GetAdaptiveConfidenceThreshold(best.symbol) : InpMinConfidenceLevel;
-   if(best.combinedScore >= adaptiveThreshold && best.signal != SIGNAL_NEUTRAL)
+   if(best.symbol != "" && best.signal != SIGNAL_NEUTRAL)
    {
       if(!CheckTradingConditions(best.symbol))
          return;
@@ -1277,6 +1277,12 @@ void ProcessMultiPairSignals()
             Print(">>> Pattern Boost aplicado: +", DoubleToString(patternBoost, 1), "%");
          }
          adjustedScore = g_adaptiveLearning.ApplyAdaptiveBias(adjustedScore);
+      }
+
+      if(adjustedScore < adaptiveThreshold)
+      {
+         LogBlock(best.symbol, "confianza baja tras ajustes");
+         return;
       }
       
       Print("=== EJECUTANDO TRADE EN ", best.symbol, " ===");
