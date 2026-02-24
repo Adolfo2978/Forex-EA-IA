@@ -375,7 +375,8 @@ void ResetBlockCounters()
 
 void RegisterBlockReason(string reason)
 {
-   string r = StringToLower(reason);
+   string r = reason;
+   StringToLower(r);
    if(StringFind(r, "spread") >= 0)
       g_blockSpread++;
    else if(StringFind(r, "mtf") >= 0)
