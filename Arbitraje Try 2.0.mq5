@@ -330,6 +330,11 @@ int OnInit()
 
    Print("===============================================\nStart EA: "+MQLInfoString(MQL_PROGRAM_NAME));
 
+   string panelSuffix="_"+(string)ChartID()+"_"+(string)inMagic;
+   glPanelBgName="ARB_PANEL_BG"+panelSuffix;
+   glPanelTextName="ARB_PANEL_TEXT"+panelSuffix;
+   glPanelHeaderName="ARB_PANEL_HDR"+panelSuffix;
+
    fnWarning(inLot,glFileLog);                      //varias comprobaciones durante el lanzamiento del robot
    fnSetThree(MxThree,inMode);                        //triángulos compuestos
    fnChangeThree(MxThree);                            //los colocó correctamente
@@ -865,33 +870,51 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
    if(bestEdge>0.0) panelColor=(color)C'16,52,33';
    if(bestEdge<0.0) panelColor=(color)C'54,24,24';
 
-   if(ObjectFind(0,glPanelBgName)<0) ObjectCreate(0,glPanelBgName,OBJ_RECTANGLE_LABEL,0,0,0);
+   long chartW=0,chartH=0;
+   ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0,chartW);
+   ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0,chartH);
+
+   int panelW=(int)MathMax(260,MathMin((double)chartW-20.0,430.0));
+   int panelH=(int)MathMax(220,MathMin((double)chartH-24.0,360.0));
+   int xDist=(chartW>panelW+12?10:2);
+   int yDist=10;
+
+   if(ObjectFind(0,glPanelBgName)<0 && !ObjectCreate(0,glPanelBgName,OBJ_RECTANGLE_LABEL,0,0,0))
+      return;
+
    ObjectSetInteger(0,glPanelBgName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0,glPanelBgName,OBJPROP_XDISTANCE,10);
-   ObjectSetInteger(0,glPanelBgName,OBJPROP_YDISTANCE,18);
-   ObjectSetInteger(0,glPanelBgName,OBJPROP_XSIZE,430);
-   ObjectSetInteger(0,glPanelBgName,OBJPROP_YSIZE,360);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_XDISTANCE,xDist);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_YDISTANCE,yDist);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_XSIZE,panelW);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_YSIZE,panelH);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_BGCOLOR,panelColor);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_COLOR,clrDimGray);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_BACK,false);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_HIDDEN,false);
 
    if(ObjectFind(0,glPanelHeaderName)<0) ObjectCreate(0,glPanelHeaderName,OBJ_LABEL,0,0,0);
    ObjectSetInteger(0,glPanelHeaderName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_XDISTANCE,24);
-   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_YDISTANCE,24);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_XDISTANCE,xDist+14);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_YDISTANCE,yDist+8);
    ObjectSetInteger(0,glPanelHeaderName,OBJPROP_COLOR,clrGold);
-   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_FONTSIZE,11);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_FONTSIZE,10);
    ObjectSetString(0,glPanelHeaderName,OBJPROP_FONT,"Segoe UI Bold");
    ObjectSetString(0,glPanelHeaderName,OBJPROP_TEXT,"ARBITRAJE TRIANGULAR IA/NN");
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_HIDDEN,false);
 
    if(ObjectFind(0,glPanelTextName)<0) ObjectCreate(0,glPanelTextName,OBJ_LABEL,0,0,0);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_XDISTANCE,24);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_YDISTANCE,48);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_XDISTANCE,xDist+14);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_YDISTANCE,yDist+28);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_COLOR,clrWhiteSmoke);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_FONTSIZE,9);
    ObjectSetString(0,glPanelTextName,OBJPROP_FONT,"Consolas");
    ObjectSetString(0,glPanelTextName,OBJPROP_TEXT,txt);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_HIDDEN,false);
+   ChartRedraw(0);
   }
 
 
