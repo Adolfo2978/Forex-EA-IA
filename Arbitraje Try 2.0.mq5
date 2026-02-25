@@ -683,14 +683,38 @@ bool fnBuildNNFeatures(string smb,ENUM_TIMEFRAMES tf,int shift,double spreadPts,
 bool fnTrainNN90Days(stThree &MxSmb[])
   {
    if(ArraySize(MxSmb)<=0) return(false);
-   string smb=MxSmb[0].smb1.name;
-   if(smb=="" || !fnSmbCheck(smb)) return(false);
+
+   string smb="";
+   int bestBars=0;
+   for(int i=0;i<ArraySize(MxSmb);i++)
+     {
+      string cand=MxSmb[i].smb1.name;
+      if(cand=="" || !fnSmbCheck(cand)) continue;
+      int b=iBars(cand,inNNTimeframe);
+      if(b>bestBars)
+        {
+         bestBars=b;
+         smb=cand;
+        }
+     }
+   if(smb=="")
+     {
+      Print("NN no entrenada: sin simbolos validos para entrenamiento.");
+      return(false);
+     }
 
    int tfMin=fnTFMinutes(inNNTimeframe);
    int needBars=(inNNTrainingDays*1440)/MathMax(tfMin,1)+260;
    int bars=iBars(smb,inNNTimeframe);
    int maxShift=MathMin(bars-3,needBars);
-   if(maxShift<260) return(false);
+
+   int minTrainBars=(int)MathMax(70,MathMin(260,needBars/3));
+   if(maxShift<minTrainBars)
+     {
+      Print("NN no entrenada: barras insuficientes en "+smb+" TF "+EnumToString(inNNTimeframe)+
+            " bars="+(string)bars+" req="+(string)minTrainBars);
+      return(false);
+     }
 
    double sumLoss=0.0;
    int samples=0;
@@ -873,11 +897,16 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
    long chartW=0,chartH=0;
    ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0,chartW);
    ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0,chartH);
+   if(chartW<=0) chartW=430;
+   if(chartH<=0) chartH=360;
 
-   int panelW=(int)MathMax(260,MathMin((double)chartW-20.0,430.0));
-   int panelH=(int)MathMax(220,MathMin((double)chartH-24.0,360.0));
+   int usableW=(int)MathMax(120,chartW-6);
+   int usableH=(int)MathMax(150,chartH-8);
+   int panelW=(int)MathMin(430,usableW);
+   int panelH=(int)MathMin(360,usableH);
    int xDist=(chartW>panelW+12?10:2);
-   int yDist=10;
+   int yDist=6;
+   bool compactPanel=(panelW<280 || panelH<230);
 
    if(ObjectFind(0,glPanelBgName)<0 && !ObjectCreate(0,glPanelBgName,OBJ_RECTANGLE_LABEL,0,0,0))
       return;
@@ -898,9 +927,9 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
    ObjectSetInteger(0,glPanelHeaderName,OBJPROP_XDISTANCE,xDist+14);
    ObjectSetInteger(0,glPanelHeaderName,OBJPROP_YDISTANCE,yDist+8);
    ObjectSetInteger(0,glPanelHeaderName,OBJPROP_COLOR,clrGold);
-   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_FONTSIZE,10);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_FONTSIZE,compactPanel?8:10);
    ObjectSetString(0,glPanelHeaderName,OBJPROP_FONT,"Segoe UI Bold");
-   ObjectSetString(0,glPanelHeaderName,OBJPROP_TEXT,"ARBITRAJE TRIANGULAR IA/NN");
+   ObjectSetString(0,glPanelHeaderName,OBJPROP_TEXT,compactPanel?"ARB IA/NN":"ARBITRAJE TRIANGULAR IA/NN");
    ObjectSetInteger(0,glPanelHeaderName,OBJPROP_SELECTABLE,false);
    ObjectSetInteger(0,glPanelHeaderName,OBJPROP_HIDDEN,false);
 
@@ -909,7 +938,7 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
    ObjectSetInteger(0,glPanelTextName,OBJPROP_XDISTANCE,xDist+14);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_YDISTANCE,yDist+28);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_COLOR,clrWhiteSmoke);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_FONTSIZE,9);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_FONTSIZE,compactPanel?7:9);
    ObjectSetString(0,glPanelTextName,OBJPROP_FONT,"Consolas");
    ObjectSetString(0,glPanelTextName,OBJPROP_TEXT,txt);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_SELECTABLE,false);
