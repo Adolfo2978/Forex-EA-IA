@@ -69,6 +69,196 @@ bool        glNNReady=false;
 datetime    glNNLastTrain=0;
 
 
+#ifndef SELECT_BY_POS
+#define SELECT_BY_POS 0
+#endif
+#ifndef SELECT_BY_TICKET
+#define SELECT_BY_TICKET 1
+#endif
+#ifndef MODE_TRADES
+#define MODE_TRADES 0
+#endif
+#ifndef MODE_MARGINREQUIRED
+#define MODE_MARGINREQUIRED 32
+#endif
+#ifndef OP_BUY
+#define OP_BUY 0
+#endif
+#ifndef OP_SELL
+#define OP_SELL 1
+#endif
+
+ulong glSelectedTicket=0;
+bool  glSelectedIsPosition=false;
+
+double MarketInfo(string symbol,int mode)
+  {
+   if(mode==MODE_MARGINREQUIRED)
+     {
+      double margin=0.0;
+      if(SymbolInfoDouble(symbol,SYMBOL_MARGIN_INITIAL,margin) && margin>0.0)
+         return(margin);
+
+      double ask=0.0,contract_size=0.0;
+      long leverage=AccountInfoInteger(ACCOUNT_LEVERAGE);
+      SymbolInfoDouble(symbol,SYMBOL_ASK,ask);
+      SymbolInfoDouble(symbol,SYMBOL_TRADE_CONTRACT_SIZE,contract_size);
+      if(leverage<=0) leverage=1;
+      return((ask*contract_size)/(double)leverage);
+     }
+   return(0.0);
+  }
+
+bool OrderSelect(int index,int select,int pool)
+  {
+   glSelectedTicket=0;
+   glSelectedIsPosition=false;
+
+   if(select==SELECT_BY_POS)
+     {
+      if(index>=0 && index<PositionsTotal())
+        {
+         ulong pt=PositionGetTicket(index);
+         if(pt>0 && PositionSelectByTicket(pt))
+           {
+            glSelectedTicket=pt;
+            glSelectedIsPosition=true;
+            return(true);
+           }
+        }
+
+      if(index>=0 && index<OrdersTotal())
+        {
+         ulong ot=OrderGetTicket(index);
+         if(ot>0 && ::OrderSelect(ot))
+           {
+            glSelectedTicket=ot;
+            glSelectedIsPosition=false;
+            return(true);
+           }
+        }
+      return(false);
+     }
+
+   if(select==SELECT_BY_TICKET)
+     {
+      ulong t=(ulong)index;
+      if(PositionSelectByTicket(t))
+        {
+         glSelectedTicket=t;
+         glSelectedIsPosition=true;
+         return(true);
+        }
+      if(::OrderSelect(t))
+        {
+         glSelectedTicket=t;
+         glSelectedIsPosition=false;
+         return(true);
+        }
+     }
+   return(false);
+  }
+
+int OrderMagicNumber()
+  {
+   if(glSelectedTicket==0) return(0);
+   if(glSelectedIsPosition)
+      return((int)PositionGetInteger(POSITION_MAGIC));
+   return((int)OrderGetInteger(ORDER_MAGIC));
+  }
+
+string OrderSymbol()
+  {
+   if(glSelectedTicket==0) return("");
+   if(glSelectedIsPosition)
+      return(PositionGetString(POSITION_SYMBOL));
+   return(OrderGetString(ORDER_SYMBOL));
+  }
+
+int OrderTicket()
+  {
+   return((int)glSelectedTicket);
+  }
+
+datetime OrderCloseTime()
+  {
+   if(glSelectedTicket==0) return(0);
+   if(glSelectedIsPosition) return(0);
+   return((datetime)OrderGetInteger(ORDER_TIME_DONE));
+  }
+
+double OrderProfit()
+  {
+   if(glSelectedTicket==0) return(0.0);
+   if(glSelectedIsPosition)
+      return(PositionGetDouble(POSITION_PROFIT));
+   return(0.0);
+  }
+
+datetime OrderOpenTime()
+  {
+   if(glSelectedTicket==0) return(0);
+   if(glSelectedIsPosition)
+      return((datetime)PositionGetInteger(POSITION_TIME));
+   return((datetime)OrderGetInteger(ORDER_TIME_SETUP));
+  }
+
+int OrderType()
+  {
+   if(glSelectedTicket==0) return(-1);
+   if(glSelectedIsPosition)
+     {
+      ENUM_POSITION_TYPE ptype=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if(ptype==POSITION_TYPE_BUY) return(OP_BUY);
+      if(ptype==POSITION_TYPE_SELL) return(OP_SELL);
+      return(-1);
+     }
+
+   ENUM_ORDER_TYPE otype=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+   if(otype==ORDER_TYPE_BUY) return(OP_BUY);
+   if(otype==ORDER_TYPE_SELL) return(OP_SELL);
+   return(-1);
+  }
+
+double OrderLots()
+  {
+   if(glSelectedTicket==0) return(0.0);
+   if(glSelectedIsPosition)
+      return(PositionGetDouble(POSITION_VOLUME));
+   return(OrderGetDouble(ORDER_VOLUME_CURRENT));
+  }
+
+bool OrderClose(int ticket,double lots,double price,int slippage)
+  {
+   ulong t=(ulong)ticket;
+   if(!PositionSelectByTicket(t))
+      return(false);
+
+   string symbol=PositionGetString(POSITION_SYMBOL);
+   ENUM_POSITION_TYPE ptype=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+
+   req.action=TRADE_ACTION_DEAL;
+   req.position=t;
+   req.symbol=symbol;
+   req.volume=lots;
+   req.deviation=slippage;
+   req.price=price;
+   req.type=(ptype==POSITION_TYPE_BUY ? ORDER_TYPE_SELL : ORDER_TYPE_BUY);
+   req.type_filling=ORDER_FILLING_IOC;
+
+   if(!OrderSend(req,res))
+      return(false);
+
+   return(res.retcode==TRADE_RETCODE_DONE || res.retcode==TRADE_RETCODE_PLACED);
+  }
+
+
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
