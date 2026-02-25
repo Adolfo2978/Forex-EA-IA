@@ -12,7 +12,7 @@
 #property description "3: Antes de realizar la prueba, debe crear un archivo con símbolos"
 #property description "4: Para el modo de demostración, utilice el triángulo de forma predeterminada: EURUSD+GBPUSD+EURGBP"
 //#property icon "\\Images\\arbitraje.ico"
-extern color   background_color = Teal; // Color de fondo de información
+input color    background_color=Teal; // Color de fondo de información
 #property strict
 
 // macros
@@ -387,7 +387,9 @@ void OnTick()
    for(int j=ArraySize(MxThree)-1;j>=0;j--)
       if(MxThree[j].status!=0) OpenThree++; //también consideramos cerrado, porque pueden colgarse durante mucho tiempo, pero de todos modos se consideran
 
-   if(DayOfWeek()==5 && Hour()>=15); else   //jueves después de las 18 no abren
+   MqlDateTime now_dt;
+   TimeToStruct(TimeCurrent(),now_dt);
+   if(!(now_dt.day_of_week==5 && now_dt.hour>=15))   // viernes después de las 15 no abren
      {
       if(inMaxThree==0 || (inMaxThree>0 && inMaxThree>OpenThree))
          fnCalcDelta(MxThree,inProfit,inCmnt,inMagic,inLot,inMaxThree,OpenThree); // consideramos la discrepancia e inmediatamente abrimos         
