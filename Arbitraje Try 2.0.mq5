@@ -816,8 +816,31 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
       return;
      }
 
-   string txt="Estado IA/NN y arbitraje\n";
-   txt+="=========================================\n";
+   long chartW=0,chartH=0;
+   ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0,chartW);
+   ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0,chartH);
+   if(chartW<=0) chartW=inPanelWidth;
+   if(chartH<=0) chartH=inPanelHeight;
+
+   int safePadding=(int)MathMax(6,MathMin(40,inPanelPadding));
+   int usableW=(int)MathMax(120,chartW-2);
+   int usableH=(int)MathMax(140,chartH-2);
+   int panelW=(int)MathMax(180,MathMin((double)usableW,(double)inPanelWidth));
+   int panelH=(int)MathMax(160,MathMin((double)usableH,(double)inPanelHeight));
+
+   int maxX=(int)MathMax(0,chartW-panelW);
+   int maxY=(int)MathMax(0,chartH-panelH);
+   int xDist=(int)MathMin((double)MathMax(0,inPanelX),(double)maxX);
+   int yDist=(int)MathMin((double)MathMax(0,inPanelY),(double)maxY);
+   bool compactPanel=(panelW<300 || panelH<240);
+
+   int headerFont=(int)MathMax(7,MathMin(18,inPanelHeaderFont));
+   int textFont=(int)MathMax(6,MathMin(16,inPanelTextFont));
+   if(compactPanel)
+     {
+      headerFont=(int)MathMax(7,headerFont-1);
+      textFont=(int)MathMax(6,textFont-1);
+     }
 
    int total=ArraySize(MxSmb);
    double bestEdge=-DBL_MAX;
@@ -875,69 +898,63 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
      }
 
    double winRate=(totalTrades>0)?(100.0*(double)totalWins/(double)totalTrades):0.0;
-   txt+="Triangulos: "+(string)total+" | Abiertos: "+(string)lcOpenThree+"\n";
-   txt+="P/L abierto: "+DoubleToString(openPL,2)+"\n";
-   txt+="IA score/conf: "+DoubleToString(avgScore,3)+" / "+DoubleToString(avgConf,1)+"%\n";
-   txt+="NN estado: "+(inUseNeuralNet?(glNNReady?"ENTRENADA":"PENDIENTE"):"OFF")+"  TF: "+EnumToString(inNNTimeframe)+"\n";
-   txt+="NN acc/loss: "+DoubleToString(glNNTrainAccuracy*100.0,1)+"% / "+DoubleToString(glNNTrainLoss,4)+"\n";
-   txt+="NN muestras: "+DoubleToString(glNNTrainSamples,0)+"  NN prom: "+DoubleToString(avgNN*100.0,1)+"%\n";
-   txt+="Trades IA: "+(string)totalTrades+" (W:"+(string)totalWins+" L:"+(string)totalLosses+") WR:"+DoubleToString(winRate,1)+"%\n";
-   txt+="Ult train: "+(glNNLastTrain>0?TimeToString(glNNLastTrain,TIME_DATE|TIME_MINUTES):"N/A")+"\n";
+   double nnAccPct=glNNTrainAccuracy*100.0;
+   double nnStrengthAvg=fnNNSignalStrength(avgNN)*100.0;
 
-   if(bestIdx>=0)
+   string txt="";
+   if(compactPanel)
      {
-      double edgeBuy=MxSmb[bestIdx].PLBuy-MxSmb[bestIdx].spreadbuy;
-      double edgeSell=MxSmb[bestIdx].PLSell-MxSmb[bestIdx].spreadsell;
-      string dir=(edgeBuy>=edgeSell)?"BUY":"SELL";
-      txt+="-----------------------------------------\n";
-      txt+="Mejor oportunidad: "+dir+"\n";
-      txt+=MxSmb[bestIdx].smb1.name+"+"+MxSmb[bestIdx].smb2.name+"+"+MxSmb[bestIdx].smb3.name+"\n";
-      txt+="Edge B/S: "+DoubleToString(edgeBuy,2)+" / "+DoubleToString(edgeSell,2)+"\n";
-      txt+="NN: "+DoubleToString(MxSmb[bestIdx].nnProb*100.0,1)+"%  Fuerza: "+DoubleToString(fnNNSignalStrength(MxSmb[bestIdx].nnProb)*100.0,1)+"%\n";
-      txt+="Conf IA: "+DoubleToString(MxSmb[bestIdx].aiConfidence,1)+"%  MM: "+DoubleToString(MxSmb[bestIdx].mmBias,0)+"\n";
+      txt+="Tri:"+(string)total+" Open:"+(string)lcOpenThree+" PL:"+DoubleToString(openPL,2)+"\n";
+      txt+="NN "+(inUseNeuralNet?(glNNReady?"OK":"WAIT"):"OFF")+" Acc:"+DoubleToString(nnAccPct,1)+"%\n";
+      txt+="Loss:"+DoubleToString(glNNTrainLoss,4)+" Samp:"+DoubleToString(glNNTrainSamples,0)+"\n";
+      txt+="NNavg:"+DoubleToString(avgNN*100.0,1)+"% Pow:"+DoubleToString(nnStrengthAvg,1)+"%\n";
+      txt+="IA sc/conf:"+DoubleToString(avgScore,2)+"/"+DoubleToString(avgConf,0)+"% WR:"+DoubleToString(winRate,1)+"%\n";
+      txt+="Train:"+(glNNLastTrain>0?TimeToString(glNNLastTrain,TIME_MINUTES):"N/A")+"\n";
+     }
+   else
+     {
+      txt+="Estado IA/NN y arbitraje\n";
+      txt+="=========================================\n";
+      txt+="Triangulos: "+(string)total+" | Abiertos: "+(string)lcOpenThree+"\n";
+      txt+="P/L abierto: "+DoubleToString(openPL,2)+"\n";
+      txt+="IA score/conf: "+DoubleToString(avgScore,3)+" / "+DoubleToString(avgConf,1)+"%\n";
+      txt+="Trades IA: "+(string)totalTrades+" (W:"+(string)totalWins+" L:"+(string)totalLosses+") WR:"+DoubleToString(winRate,1)+"%\n";
+      txt+="----- RED NEURONAL -----\n";
+      txt+="NN estado: "+(inUseNeuralNet?(glNNReady?"ENTRENADA":"PENDIENTE"):"OFF")+"  TF: "+EnumToString(inNNTimeframe)+"\n";
+      txt+="NN acc/loss: "+DoubleToString(nnAccPct,1)+"% / "+DoubleToString(glNNTrainLoss,4)+"\n";
+      txt+="NN muestras: "+DoubleToString(glNNTrainSamples,0)+"  NN prom: "+DoubleToString(avgNN*100.0,1)+"%\n";
+      txt+="Fuerza NN prom: "+DoubleToString(nnStrengthAvg,1)+"%\n";
+      txt+="Ult train: "+(glNNLastTrain>0?TimeToString(glNNLastTrain,TIME_DATE|TIME_MINUTES):"N/A")+"\n";
 
-      txt+="Top oportunidades:\n";
-      for(int t=0;t<3;t++)
+      if(bestIdx>=0)
         {
-         int idx=topIdx[t];
-         if(idx<0) continue;
-         double eb=MxSmb[idx].PLBuy-MxSmb[idx].spreadbuy;
-         double es=MxSmb[idx].PLSell-MxSmb[idx].spreadsell;
-         string d=(eb>=es)?"B":"S";
-         txt+=(string)(t+1)+") "+d+" "+MxSmb[idx].smb1.name+"+"+MxSmb[idx].smb2.name+"+"+MxSmb[idx].smb3.name;
-         txt+=" edge:"+DoubleToString(topEdge[t],2)+" nn:"+DoubleToString(MxSmb[idx].nnProb*100.0,0)+"%\n";
+         double edgeBuy=MxSmb[bestIdx].PLBuy-MxSmb[bestIdx].spreadbuy;
+         double edgeSell=MxSmb[bestIdx].PLSell-MxSmb[bestIdx].spreadsell;
+         string dir=(edgeBuy>=edgeSell)?"BUY":"SELL";
+         txt+="-----------------------------------------\n";
+         txt+="Mejor oportunidad: "+dir+"\n";
+         txt+=MxSmb[bestIdx].smb1.name+"+"+MxSmb[bestIdx].smb2.name+"+"+MxSmb[bestIdx].smb3.name+"\n";
+         txt+="Edge B/S: "+DoubleToString(edgeBuy,2)+" / "+DoubleToString(edgeSell,2)+"\n";
+         txt+="NN: "+DoubleToString(MxSmb[bestIdx].nnProb*100.0,1)+"%  Fuerza: "+DoubleToString(fnNNSignalStrength(MxSmb[bestIdx].nnProb)*100.0,1)+"%\n";
+         txt+="Conf IA: "+DoubleToString(MxSmb[bestIdx].aiConfidence,1)+"%  MM: "+DoubleToString(MxSmb[bestIdx].mmBias,0)+"\n";
+
+         txt+="Top oportunidades:\n";
+         for(int t=0;t<3;t++)
+           {
+            int idx=topIdx[t];
+            if(idx<0) continue;
+            double eb=MxSmb[idx].PLBuy-MxSmb[idx].spreadbuy;
+            double es=MxSmb[idx].PLSell-MxSmb[idx].spreadsell;
+            string d=(eb>=es)?"B":"S";
+            txt+=(string)(t+1)+") "+d+" "+MxSmb[idx].smb1.name+"+"+MxSmb[idx].smb2.name+"+"+MxSmb[idx].smb3.name;
+            txt+=" edge:"+DoubleToString(topEdge[t],2)+" nn:"+DoubleToString(MxSmb[idx].nnProb*100.0,0)+"%\n";
+           }
         }
      }
 
    color panelColor=background_color;
    if(bestEdge>0.0) panelColor=(color)C'16,52,33';
    if(bestEdge<0.0) panelColor=(color)C'54,24,24';
-
-   long chartW=0,chartH=0;
-   ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0,chartW);
-   ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0,chartH);
-   if(chartW<=0) chartW=inPanelWidth;
-   if(chartH<=0) chartH=inPanelHeight;
-
-   int safePadding=(int)MathMax(6,MathMin(40,inPanelPadding));
-   int usableW=(int)MathMax(120,chartW-2);
-   int usableH=(int)MathMax(140,chartH-2);
-   int panelW=(int)MathMax(180,MathMin((double)usableW,(double)inPanelWidth));
-   int panelH=(int)MathMax(160,MathMin((double)usableH,(double)inPanelHeight));
-
-   int maxX=(int)MathMax(0,chartW-panelW);
-   int maxY=(int)MathMax(0,chartH-panelH);
-   int xDist=(int)MathMin((double)MathMax(0,inPanelX),(double)maxX);
-   int yDist=(int)MathMin((double)MathMax(0,inPanelY),(double)maxY);
-   bool compactPanel=(panelW<300 || panelH<240);
-
-   int headerFont=(int)MathMax(7,MathMin(18,inPanelHeaderFont));
-   int textFont=(int)MathMax(6,MathMin(16,inPanelTextFont));
-   if(compactPanel)
-     {
-      headerFont=(int)MathMax(7,headerFont-1);
-      textFont=(int)MathMax(6,textFont-1);
-     }
 
    if(ObjectFind(0,glPanelBgName)<0 && !ObjectCreate(0,glPanelBgName,OBJ_RECTANGLE_LABEL,0,0,0))
       return;
