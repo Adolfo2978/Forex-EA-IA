@@ -846,12 +846,13 @@ void fnSetThree(stThree &MxSmb[],enMode mode)//CAMBIADO  JP
 //tiene triángulos de archivo
 void fnGetThreeFromFile(stThree &MxSmb[])
   {
-// si no se encuentra el archivo de símbolos, imprima sobre él y salga
+// si no se encuentra el archivo de símbolos, usar fallback a Market Watch en vez de retirar el EA
    int fh=FILEOPENREAD(FILENAME);
    if(fh==INVALID_HANDLE)
      {
-      Print("Archivo con símbolos no leídos!");
-      ExpertRemove();
+      Print("Archivo con símbolos no leído: "+FILENAME+". Fallback a Market Watch.");
+      fnGetThreeFromMarketWatch(MxSmb);
+      return;
      }
 
 // mover el carro al comienzo del archivo
