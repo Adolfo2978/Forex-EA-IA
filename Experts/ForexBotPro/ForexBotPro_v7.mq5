@@ -217,6 +217,35 @@ input string InpTelegramChatId = "7770112666";               // Telegram chat ID
 input string InpTelegramChannel = "Forex Bot Pro v7.1 | Señales Premium";
 input int InpTelegramUpdateSec = 300;              // Update interval (seconds)
 #include <ForexBotPro\TelegramNotifier.mqh>
+
+input group "┌─ STRATEGY 2: TRIANGULAR ARBITRAGE + IA"
+input bool InpEnableArbitrageStrategy = true;      // Enable secondary arbitrage strategy
+input string InpArbTriangle = "EURUSD,GBPUSD,EURGBP"; // Triangle symbols A,B,C
+input ulong InpArbMagicNumber = 223456;            // Magic number for arbitrage strategy
+input double InpArbBaseLot = 0.01;                 // Base lot for A and B legs
+input double InpArbMinEdgePips = 0.4;              // Min edge threshold (pips equivalent)
+input double InpArbTakeProfit = 2.0;               // Basket TP in account currency
+input double InpArbStopLoss = 4.0;                 // Basket SL in account currency
+input int InpArbMaxHoldSeconds = 120;              // Max basket hold time
+
+input group "┌─ RFI AI SIMPLIFIED LAYER"
+input bool InpUseRFILayer = true;                  // Enable RFI zones overlay
+input ENUM_TIMEFRAMES InpRFITF = PERIOD_M15;      // Working TF for RFI zones
+input bool InpRFIUseMTF = true;                    // Show higher timeframe zones (MTF)
+input ENUM_TIMEFRAMES InpRFIHigherTF = PERIOD_H1;  // Higher TF for MTF mode
+input int InpRFIImpulseBars = 80;                  // Lookback bars for impulse detection
+input double InpRFIMinImpulseATR = 0.8;            // Min impulse size in ATR units
+input bool InpRFIEnableAlerts = true;              // Enable chart/sound/push alerts
+input bool InpRFIPlaySound = true;                 // Play sound alerts
+input bool InpRFIPush = false;                     // Send mobile notifications
+input string InpRFISoundFile = "alert2.wav";      // Alert sound file
+
+
+input group "┌─ MTF SIGNAL (15M/H1/H4)"
+input bool InpUseMTF15H1H4Signal = true;          // Require MTF signal alignment (15M/H1/H4)
+input int InpMTFMinAlignedFrames = 2;             // Min aligned frames (2 or 3)
+input int InpMTFFastEMA = 50;                     // Fast EMA for MTF trend
+input int InpMTFSlowEMA = 200;                    // Slow EMA for MTF trend
 //+------------------------------------------------------------------+
 //| Global Variables                                                 |
 //+------------------------------------------------------------------+
@@ -246,6 +275,103 @@ string g_openedCharts[];
 int g_openedChartsCount = 0;
 ulong g_lastCheckedTickets[];
 int g_lastCheckedCount = 0;
+
+string g_arbSymA = "";
+string g_arbSymB = "";
+string g_arbSymC = "";
+bool g_arbBasketOpen = false;
+int g_arbDirection = 0; // 1 buy-cycle, -1 sell-cycle
+datetime g_arbOpenTime = 0;
+
+bool InitArbitrageStrategy();
+bool ParseArbTriangle(string tri,string &a,string &b,string &c);
+void ProcessArbitrageStrategy();
+bool HasArbPositions();
+double GetArbBasketProfit();
+void CloseArbBasket(string reason);
+bool SendArbOrder(string symbol, ENUM_ORDER_TYPE orderType, double lot, string comment);
+
+bool g_rfiShowHistory = false;
+bool g_rfiShowMTF2Start = true;
+bool g_rfiPanelVisible = true;
+datetime g_lastRFIUpdate = 0;
+string g_rfiAlertKeys[];
+datetime g_rfiAlertTimes[];
+
+double ComputeATRFromPrices(string symbol, ENUM_TIMEFRAMES tf, int period, int shift)
+{
+   if(period<=1) period=14;
+   double sumTR=0.0;
+   int count=0;
+   for(int i=shift; i<shift+period; i++)
+   {
+      double h=iHigh(symbol,tf,i);
+      double l=iLow(symbol,tf,i);
+      double prevClose=iClose(symbol,tf,i+1);
+      if(h<=0 || l<=0 || prevClose<=0) continue;
+      double tr1=h-l;
+      double tr2=MathAbs(h-prevClose);
+      double tr3=MathAbs(l-prevClose);
+      double tr=MathMax(tr1, MathMax(tr2,tr3));
+      sumTR+=tr;
+      count++;
+   }
+   if(count<=0) return 0.0;
+   return sumTR/count;
+}
+
+
+int GetTrendDirectionByEMA(string symbol, ENUM_TIMEFRAMES tf, int fastPeriod, int slowPeriod, int shift)
+{
+   int hFast=iMA(symbol, tf, fastPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   int hSlow=iMA(symbol, tf, slowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   if(hFast==INVALID_HANDLE || hSlow==INVALID_HANDLE)
+   {
+      if(hFast!=INVALID_HANDLE) IndicatorRelease(hFast);
+      if(hSlow!=INVALID_HANDLE) IndicatorRelease(hSlow);
+      return 0;
+   }
+
+   double fastBuf[1], slowBuf[1];
+   bool okFast=(CopyBuffer(hFast,0,shift,1,fastBuf)==1);
+   bool okSlow=(CopyBuffer(hSlow,0,shift,1,slowBuf)==1);
+   IndicatorRelease(hFast);
+   IndicatorRelease(hSlow);
+   if(!okFast || !okSlow) return 0;
+
+   if(fastBuf[0]>slowBuf[0]) return 1;
+   if(fastBuf[0]<slowBuf[0]) return -1;
+   return 0;
+}
+
+bool CheckMTF15H1H4Signal(string symbol, bool isBuy, int &alignedCount, string &detail)
+{
+   alignedCount=0;
+
+   int d15=GetTrendDirectionByEMA(symbol, PERIOD_M15, InpMTFFastEMA, InpMTFSlowEMA, 0);
+   int dH1=GetTrendDirectionByEMA(symbol, PERIOD_H1, InpMTFFastEMA, InpMTFSlowEMA, 0);
+   int dH4=GetTrendDirectionByEMA(symbol, PERIOD_H4, InpMTFFastEMA, InpMTFSlowEMA, 0);
+
+   int expected = isBuy ? 1 : -1;
+   if(d15==expected) alignedCount++;
+   if(dH1==expected) alignedCount++;
+   if(dH4==expected) alignedCount++;
+
+   detail=StringFormat("M15=%d H1=%d H4=%d aligned=%d", d15,dH1,dH4,alignedCount);
+
+   int minFrames=MathMax(1, MathMin(3, InpMTFMinAlignedFrames));
+   return(alignedCount>=minFrames);
+}
+
+bool ComputeRFILevels(string symbol, ENUM_TIMEFRAMES tf, int lookback, double minImpulseATR,
+                      double &buyLow, double &buyHigh, double &sellLow, double &sellHigh,
+                      bool &buyActive, bool &sellActive, datetime &buyStart, datetime &sellStart);
+void DrawRFIZones(string symbol, string prefix, ENUM_TIMEFRAMES tf,
+                  double buyLow, double buyHigh, double sellLow, double sellHigh,
+                  bool buyActive, bool sellActive, datetime buyStart, datetime sellStart);
+void UpdateRFILayer();
+void TriggerRFIAlert(string symbol, string side, double price, ENUM_TIMEFRAMES tf);
+void ClearRFIObjects();
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
@@ -334,6 +460,18 @@ int OnInit()
       Print("Symbol: ", _Symbol);
    }
    
+
+   // Ensure neural network is available for parallel arbitrage strategy in multi-pair mode
+   if(InpEnableArbitrageStrategy && InpMultiPairMode)
+   {
+      g_neuralNet.Init(_Symbol, InpPrimaryTF, InpGMTOffset);
+      if(InpUseNeuralNetwork && InpTrainNNOnInit)
+         g_neuralNet.TrainFromHistory(_Symbol, InpPrimaryTF, InpNNTrainDays, InpNNTrainEpochs,
+            InpNNTrainLearningRate, InpNNTargetAccuracy, InpNNTrainMaxEpochs, InpNNTrainMaxAttempts,
+            InpNNBalanceLabels, InpGMTOffset, InpFocusMondayAsia, InpAsiaStartHour, InpAsiaEndHour,
+            InpMondayAsiaWeight);
+   }
+
    // Initialize Market Maker
    if(InpUseMarketMaker)
    {
@@ -368,7 +506,7 @@ int OnInit()
    }
    
    // Initialize Professional Dashboard
-   if(InpShowProfessionalDashboard)
+   if(InpShowProfessionalDashboard && g_rfiPanelVisible)
    {
       int dashboardX = -InpDashboardWidth;
       g_dashboard.Initialize(ChartID(), dashboardX, InpDashboardY, InpDashboardTheme);
@@ -378,6 +516,8 @@ int OnInit()
       Print("Professional Dashboard: ACTIVADO");
    }
    
+   InitArbitrageStrategy();
+
    g_initialized = true;
    Print("=== Inicialización Completa ===");
    EventSetTimer(InpScanInterval);
@@ -390,7 +530,7 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    
-   if(InpShowProfessionalDashboard)
+   if(InpShowProfessionalDashboard && g_rfiPanelVisible)
    {
       g_dashboard.Cleanup();
       Print("Professional Dashboard: LIMPIADO");
@@ -401,6 +541,8 @@ void OnDeinit(const int reason)
    
    if(InpVisualPatterns)
       g_visualPatterns.ClearAllPatterns();
+
+   ClearRFIObjects();
    
    Print("=== Forex Bot Pro v7.1 Detenido ===");
    Print("Razón: ", reason);
@@ -457,6 +599,11 @@ void OnTick()
       }
    }
    
+   UpdateRFILayer();
+
+   // Parallel secondary strategy: triangular arbitrage
+   ProcessArbitrageStrategy();
+
    // Single pair mode
    if(!InpMultiPairMode)
    {
@@ -931,6 +1078,19 @@ void AnalyzeAndTradeSingle()
       LogBlock(_Symbol, "mtf requerido");
       return;
    }
+
+   if(InpUseMTF15H1H4Signal)
+   {
+      bool isBuy=(technicalSignal==SIGNAL_BUY || technicalSignal==SIGNAL_STRONG_BUY || technicalSignal==SIGNAL_CONFIRMED_BUY || technicalSignal==SIGNAL_WEAK_BUY || technicalSignal==SIGNAL_MODERATE_BUY);
+      int aligned=0; string mtfDetail="";
+      if(!CheckMTF15H1H4Signal(_Symbol,isBuy,aligned,mtfDetail))
+      {
+         Print("MTF 15M/H1/H4 no alineado: ", mtfDetail);
+         LogBlock(_Symbol, "mtf 15m/h1/h4");
+         return;
+      }
+      combinedConfidence += aligned*1.5;
+   }
    
    finalSignal = GetFinalSignal(technicalSignal, combinedConfidence);
    Print("=== SEÑAL APROBADA ===");
@@ -1088,6 +1248,18 @@ void ProcessMultiPairSignals()
       {
          LogBlock(best.symbol, "mtf no alineado");
          return;
+      }
+
+      if(InpUseMTF15H1H4Signal)
+      {
+         bool isBuyBest=(best.signal==SIGNAL_BUY || best.signal==SIGNAL_STRONG_BUY || best.signal==SIGNAL_CONFIRMED_BUY || best.signal==SIGNAL_WEAK_BUY || best.signal==SIGNAL_MODERATE_BUY);
+         int aligned=0; string mtfDetail="";
+         if(!CheckMTF15H1H4Signal(best.symbol,isBuyBest,aligned,mtfDetail))
+         {
+            LogBlock(best.symbol, "mtf 15m/h1/h4 multi");
+            if(InpDebugMode) Print("MTF 15M/H1/H4 multi blocked: ", mtfDetail);
+            return;
+         }
       }
    
    if(InpUseMarketMaker && InpUseKillZoneFilter)
@@ -1868,7 +2040,9 @@ void OnChartEvent(const int id, const long& lparam, const double& dparam, const 
    {
       if(lparam == 'R' || lparam == 'r')
       {
-         Print("Forzando escaneo manual...");
+         g_rfiShowHistory = !g_rfiShowHistory;
+         Print("RFI historial: ", (g_rfiShowHistory ? "ON" : "OFF"));
+         UpdateRFILayer();
          if(InpMultiPairMode)
          {
             g_scanner.ScanAll();
@@ -1879,17 +2053,18 @@ void OnChartEvent(const int id, const long& lparam, const double& dparam, const 
             AnalyzeAndTradeSingle();
          }
       }
-      else if(lparam == 'P' || lparam == 'p')
+      else if(lparam == 'Z' || lparam == 'z')
       {
-//          if(InpMultiPairMode)
-//          {
-//             static bool panelVisible = true;
-//             if(panelVisible)
-//                g_scanner.DeletePanel();
-//             else
-//                g_scanner.CreatePanel();
-//             panelVisible = !panelVisible;
-//          }
+         g_rfiPanelVisible = !g_rfiPanelVisible;
+         Print("Panel principal: ", (g_rfiPanelVisible ? "VISIBLE" : "OCULTO"));
+         if(!g_rfiPanelVisible && InpShowProfessionalDashboard)
+            g_dashboard.Cleanup();
+      }
+      else if(lparam == 'I' || lparam == 'i')
+      {
+         g_rfiShowMTF2Start = !g_rfiShowMTF2Start;
+         Print("RFI MTF-2 inicio: ", (g_rfiShowMTF2Start ? "ON" : "OFF"));
+         UpdateRFILayer();
       }
       else if(lparam == 'C' || lparam == 'c')
       {
@@ -1956,6 +2131,353 @@ double OnTester()
    
    return score;
 }
+
+
+bool ParseArbTriangle(string tri,string &a,string &b,string &c)
+{
+   string parts[];
+   int n=StringSplit(tri, ',', parts);
+   if(n<3) return false;
+   a=parts[0]; b=parts[1]; c=parts[2];
+   StringTrimLeft(a); StringTrimRight(a);
+   StringTrimLeft(b); StringTrimRight(b);
+   StringTrimLeft(c); StringTrimRight(c);
+   return (StringLen(a)>0 && StringLen(b)>0 && StringLen(c)>0);
+}
+
+bool InitArbitrageStrategy()
+{
+   if(!InpEnableArbitrageStrategy) return true;
+   if(!ParseArbTriangle(InpArbTriangle,g_arbSymA,g_arbSymB,g_arbSymC))
+   {
+      Print("ArbStrategy: invalid triangle config: ", InpArbTriangle);
+      return false;
+   }
+   Print("ArbStrategy initialized: ", g_arbSymA, " + ", g_arbSymB, " + ", g_arbSymC);
+   return true;
+}
+
+bool SendArbOrder(string symbol, ENUM_ORDER_TYPE orderType, double lot, string comment)
+{
+   MqlTick tk;
+   if(!SymbolInfoTick(symbol, tk)) return false;
+
+   MqlTradeRequest req; MqlTradeResult res;
+   ZeroMemory(req); ZeroMemory(res);
+   req.action = TRADE_ACTION_DEAL;
+   req.symbol = symbol;
+   req.volume = lot;
+   req.magic = InpArbMagicNumber;
+   req.deviation = 20;
+   req.comment = comment;
+   req.type = orderType;
+   req.price = (orderType==ORDER_TYPE_BUY)?tk.ask:tk.bid;
+   req.type_filling = ORDER_FILLING_FOK;
+
+   if(!OrderSend(req,res)) return false;
+   if(res.retcode!=TRADE_RETCODE_DONE && res.retcode!=TRADE_RETCODE_PLACED)
+   {
+      Print("Arb order failed ", symbol, " rc=", res.retcode);
+      return false;
+   }
+   return true;
+}
+
+bool HasArbPositions()
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong tk=PositionGetTicket(i);
+      if(!PositionSelectByTicket(tk)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)==InpArbMagicNumber) return true;
+   }
+   return false;
+}
+
+double GetArbBasketProfit()
+{
+   double pl=0.0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong tk=PositionGetTicket(i);
+      if(!PositionSelectByTicket(tk)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpArbMagicNumber) continue;
+      pl += PositionGetDouble(POSITION_PROFIT);
+   }
+   return pl;
+}
+
+void CloseArbBasket(string reason)
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong tk=PositionGetTicket(i);
+      if(!PositionSelectByTicket(tk)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpArbMagicNumber) continue;
+      string symbol=PositionGetString(POSITION_SYMBOL);
+      double vol=PositionGetDouble(POSITION_VOLUME);
+      ENUM_POSITION_TYPE pt=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      MqlTick tick; if(!SymbolInfoTick(symbol,tick)) continue;
+      MqlTradeRequest req; MqlTradeResult res;
+      ZeroMemory(req); ZeroMemory(res);
+      req.action=TRADE_ACTION_DEAL;
+      req.symbol=symbol;
+      req.volume=vol;
+      req.magic=InpArbMagicNumber;
+      req.deviation=20;
+      req.type=(pt==POSITION_TYPE_BUY)?ORDER_TYPE_SELL:ORDER_TYPE_BUY;
+      req.price=(req.type==ORDER_TYPE_BUY)?tick.ask:tick.bid;
+      req.type_filling=ORDER_FILLING_FOK;
+      req.comment="ArbClose "+reason;
+      bool sent=OrderSend(req,res);
+      if(!sent || (res.retcode!=TRADE_RETCODE_DONE && res.retcode!=TRADE_RETCODE_PLACED))
+         Print("Arb close failed ", symbol, " reason=", reason, " rc=", res.retcode, " err=", GetLastError());
+   }
+   g_arbBasketOpen=false;
+   g_arbDirection=0;
+}
+
+void ProcessArbitrageStrategy()
+{
+   if(!InpEnableArbitrageStrategy) return;
+   if(g_arbSymA=="" || g_arbSymB=="" || g_arbSymC=="") return;
+
+   bool has=HasArbPositions();
+   if(has && !g_arbBasketOpen) g_arbBasketOpen=true;
+
+   if(g_arbBasketOpen)
+   {
+      double pl=GetArbBasketProfit();
+      if(pl>=InpArbTakeProfit) { CloseArbBasket("TP"); return; }
+      if(pl<=-InpArbStopLoss) { CloseArbBasket("SL"); return; }
+      if((TimeCurrent()-g_arbOpenTime) > InpArbMaxHoldSeconds) { CloseArbBasket("Timeout"); return; }
+      return;
+   }
+
+   MqlTick a,b,c;
+   if(!SymbolInfoTick(g_arbSymA,a) || !SymbolInfoTick(g_arbSymB,b) || !SymbolInfoTick(g_arbSymC,c)) return;
+   if(a.ask<=0 || b.ask<=0 || c.ask<=0) return;
+
+   double edgeBuy = (b.bid*c.bid - a.ask);
+   double edgeSell = (a.bid - b.ask*c.ask);
+   double pointA = SymbolInfoDouble(g_arbSymA,SYMBOL_POINT);
+   if(pointA<=0) return;
+   double edgePipsBuy = edgeBuy/pointA;
+   double edgePipsSell = edgeSell/pointA;
+
+   NNPrediction pred = g_neuralNet.Predict();
+   bool nnBuy = (!InpUseNeuralNetwork || pred.buyProb>=0.55);
+   bool nnSell = (!InpUseNeuralNetwork || pred.sellProb>=0.55);
+
+   if(edgePipsBuy>=InpArbMinEdgePips && nnBuy)
+   {
+      double lot3=NormalizeDouble(b.ask*InpArbBaseLot,2);
+      if(SendArbOrder(g_arbSymA,ORDER_TYPE_BUY,InpArbBaseLot,"ArbA Buy") &&
+         SendArbOrder(g_arbSymB,ORDER_TYPE_SELL,InpArbBaseLot,"ArbB Sell") &&
+         SendArbOrder(g_arbSymC,ORDER_TYPE_SELL,lot3,"ArbC Sell"))
+      {
+         g_arbBasketOpen=true;
+         g_arbDirection=1;
+         g_arbOpenTime=TimeCurrent();
+      }
+      else CloseArbBasket("PartialOpen");
+   }
+   else if(edgePipsSell>=InpArbMinEdgePips && nnSell)
+   {
+      double lot3=NormalizeDouble(b.ask*InpArbBaseLot,2);
+      if(SendArbOrder(g_arbSymA,ORDER_TYPE_SELL,InpArbBaseLot,"ArbA Sell") &&
+         SendArbOrder(g_arbSymB,ORDER_TYPE_BUY,InpArbBaseLot,"ArbB Buy") &&
+         SendArbOrder(g_arbSymC,ORDER_TYPE_BUY,lot3,"ArbC Buy"))
+      {
+         g_arbBasketOpen=true;
+         g_arbDirection=-1;
+         g_arbOpenTime=TimeCurrent();
+      }
+      else CloseArbBasket("PartialOpen");
+   }
+}
+
+
+
+bool ComputeRFILevels(string symbol, ENUM_TIMEFRAMES tf, int lookback, double minImpulseATR,
+                      double &buyLow, double &buyHigh, double &sellLow, double &sellHigh,
+                      bool &buyActive, bool &sellActive, datetime &buyStart, datetime &sellStart)
+{
+   buyLow=0; buyHigh=0; sellLow=0; sellHigh=0;
+   buyActive=false; sellActive=false;
+   buyStart=0; sellStart=0;
+
+   int bars=iBars(symbol, tf);
+   if(bars<lookback+20) return false;
+
+   int bestBull=-1, bestBear=-1;
+   double bestBullBody=0.0, bestBearBody=0.0;
+
+   for(int i=1; i<=lookback; i++)
+   {
+      double o=iOpen(symbol, tf, i), c=iClose(symbol, tf, i), h=iHigh(symbol, tf, i), l=iLow(symbol, tf, i);
+      double atr=ComputeATRFromPrices(symbol, tf, 14, i);
+      if(o<=0 || c<=0 || h<=0 || l<=0 || atr<=0) continue;
+      double body=MathAbs(c-o);
+      if(c>o && body>=atr*minImpulseATR && body>bestBullBody)
+      {
+         bestBullBody=body;
+         bestBull=i;
+      }
+      if(c<o && body>=atr*minImpulseATR && body>bestBearBody)
+      {
+         bestBearBody=body;
+         bestBear=i;
+      }
+   }
+
+   if(bestBull>0)
+   {
+      double o=iOpen(symbol,tf,bestBull), c=iClose(symbol,tf,bestBull), l=iLow(symbol,tf,bestBull);
+      buyLow=l;
+      buyHigh=MathMin(o,c);
+      buyStart=iTime(symbol,tf,bestBull);
+   }
+   if(bestBear>0)
+   {
+      double o=iOpen(symbol,tf,bestBear), c=iClose(symbol,tf,bestBear), h=iHigh(symbol,tf,bestBear);
+      sellHigh=h;
+      sellLow=MathMax(o,c);
+      sellStart=iTime(symbol,tf,bestBear);
+   }
+
+   MqlTick tk;
+   if(!SymbolInfoTick(symbol,tk)) return true;
+   if(buyLow>0 && buyHigh>0 && tk.bid>=buyLow && tk.bid<=buyHigh) buyActive=true;
+   if(sellLow>0 && sellHigh>0 && tk.ask>=sellLow && tk.ask<=sellHigh) sellActive=true;
+   return true;
+}
+
+void DrawRFIZones(string symbol, string prefix, ENUM_TIMEFRAMES tf,
+                  double buyLow, double buyHigh, double sellLow, double sellHigh,
+                  bool buyActive, bool sellActive, datetime buyStart, datetime sellStart)
+{
+   int bars=iBars(symbol, tf);
+   if(bars<5) return;
+   datetime t1 = iTime(symbol, tf, MathMin(120, bars-1));
+   datetime t2 = TimeCurrent() + PeriodSeconds(tf) * 20;
+
+   string buyObj=prefix+"_BUY";
+   string sellObj=prefix+"_SELL";
+
+   if(buyLow>0 && buyHigh>0)
+   {
+      if(ObjectFind(0,buyObj)<0) ObjectCreate(0,buyObj,OBJ_RECTANGLE,0,t1,buyLow,t2,buyHigh);
+      ObjectSetInteger(0,buyObj,OBJPROP_COLOR, buyActive?clrLime:clrSeaGreen);
+      ObjectSetInteger(0,buyObj,OBJPROP_STYLE,STYLE_SOLID);
+      ObjectSetInteger(0,buyObj,OBJPROP_BACK,true);
+      ObjectSetInteger(0,buyObj,OBJPROP_FILL,true);
+      ObjectMove(0,buyObj,0,t1,buyLow);
+      ObjectMove(0,buyObj,1,t2,buyHigh);
+
+      string arr=prefix+"_BUY_ARROW";
+      if(ObjectFind(0,arr)<0) ObjectCreate(0,arr,OBJ_ARROW_UP,0,t2,buyLow);
+      ObjectMove(0,arr,0,t2,buyLow);
+      ObjectSetInteger(0,arr,OBJPROP_COLOR,buyActive?clrLime:clrGreen);
+
+      if(g_rfiShowMTF2Start && buyStart>0)
+      {
+         string st=prefix+"_BUY_START";
+         if(ObjectFind(0,st)<0) ObjectCreate(0,st,OBJ_ARROW,0,buyStart,buyHigh);
+         ObjectMove(0,st,0,buyStart,buyHigh);
+         ObjectSetInteger(0,st,OBJPROP_ARROWCODE,159);
+         ObjectSetInteger(0,st,OBJPROP_COLOR,clrAqua);
+      }
+   }
+
+   if(sellLow>0 && sellHigh>0)
+   {
+      if(ObjectFind(0,sellObj)<0) ObjectCreate(0,sellObj,OBJ_RECTANGLE,0,t1,sellLow,t2,sellHigh);
+      ObjectSetInteger(0,sellObj,OBJPROP_COLOR, sellActive?clrTomato:clrIndianRed);
+      ObjectSetInteger(0,sellObj,OBJPROP_STYLE,STYLE_SOLID);
+      ObjectSetInteger(0,sellObj,OBJPROP_BACK,true);
+      ObjectSetInteger(0,sellObj,OBJPROP_FILL,true);
+      ObjectMove(0,sellObj,0,t1,sellLow);
+      ObjectMove(0,sellObj,1,t2,sellHigh);
+
+      string arr=prefix+"_SELL_ARROW";
+      if(ObjectFind(0,arr)<0) ObjectCreate(0,arr,OBJ_ARROW_DOWN,0,t2,sellHigh);
+      ObjectMove(0,arr,0,t2,sellHigh);
+      ObjectSetInteger(0,arr,OBJPROP_COLOR,sellActive?clrTomato:clrRed);
+
+      if(g_rfiShowMTF2Start && sellStart>0)
+      {
+         string st=prefix+"_SELL_START";
+         if(ObjectFind(0,st)<0) ObjectCreate(0,st,OBJ_ARROW,0,sellStart,sellLow);
+         ObjectMove(0,st,0,sellStart,sellLow);
+         ObjectSetInteger(0,st,OBJPROP_ARROWCODE,159);
+         ObjectSetInteger(0,st,OBJPROP_COLOR,clrMagenta);
+      }
+   }
+}
+
+void TriggerRFIAlert(string symbol, string side, double price, ENUM_TIMEFRAMES tf)
+{
+   if(!InpRFIEnableAlerts) return;
+   string key=symbol+"|"+side+"|"+EnumToString(tf);
+   datetime now=TimeCurrent();
+
+   int idx=-1;
+   for(int i=0;i<ArraySize(g_rfiAlertKeys);i++) if(g_rfiAlertKeys[i]==key){idx=i;break;}
+   if(idx>=0 && (now-g_rfiAlertTimes[idx])<300) return;
+   if(idx<0)
+   {
+      int n=ArraySize(g_rfiAlertKeys);
+      ArrayResize(g_rfiAlertKeys,n+1);
+      ArrayResize(g_rfiAlertTimes,n+1);
+      idx=n;
+      g_rfiAlertKeys[idx]=key;
+   }
+   g_rfiAlertTimes[idx]=now;
+
+   string msg=StringFormat("RFI %s activo en %s (%s) @ %.5f", side, symbol, EnumToString(tf), price);
+   Alert(msg);
+   if(InpRFIPlaySound) PlaySound(InpRFISoundFile);
+   if(InpRFIPush) SendNotification(msg);
+}
+
+void UpdateRFILayer()
+{
+   if(!InpUseRFILayer) return;
+   if(TimeCurrent()-g_lastRFIUpdate < 3) return;
+   g_lastRFIUpdate = TimeCurrent();
+
+   int lookback = g_rfiShowHistory ? MathMax(InpRFIImpulseBars, 240) : InpRFIImpulseBars;
+   double bL,bH,sL,sH; bool bA,sA; datetime bS,sS;
+
+   if(ComputeRFILevels(_Symbol, InpRFITF, lookback, InpRFIMinImpulseATR, bL,bH,sL,sH,bA,sA,bS,sS))
+   {
+      DrawRFIZones(_Symbol, "RFI_MAIN", InpRFITF, bL,bH,sL,sH,bA,sA,bS,sS);
+      MqlTick tk; if(SymbolInfoTick(_Symbol,tk))
+      {
+         if(bA) TriggerRFIAlert(_Symbol, "BUY_ZONE", tk.bid, InpRFITF);
+         if(sA) TriggerRFIAlert(_Symbol, "SELL_ZONE", tk.ask, InpRFITF);
+      }
+   }
+
+   if(InpRFIUseMTF)
+   {
+      double mbL,mbH,msL,msH; bool mbA,msA; datetime mbS,msS;
+      if(ComputeRFILevels(_Symbol, InpRFIHigherTF, lookback, InpRFIMinImpulseATR, mbL,mbH,msL,msH,mbA,msA,mbS,msS))
+         DrawRFIZones(_Symbol, "RFI_MTF", InpRFIHigherTF, mbL,mbH,msL,msH,mbA,msA,mbS,msS);
+   }
+}
+
+void ClearRFIObjects()
+{
+   string objs[] = {
+      "RFI_MAIN_BUY","RFI_MAIN_SELL","RFI_MAIN_BUY_ARROW","RFI_MAIN_SELL_ARROW","RFI_MAIN_BUY_START","RFI_MAIN_SELL_START",
+      "RFI_MTF_BUY","RFI_MTF_SELL","RFI_MTF_BUY_ARROW","RFI_MTF_SELL_ARROW","RFI_MTF_BUY_START","RFI_MTF_SELL_START"
+   };
+   for(int i=0;i<ArraySize(objs);i++) ObjectDelete(0, objs[i]);
+}
+
 //+------------------------------------------------------------------+
 //| END OF FOREXBOTPRO v7.1                                         |
 //+------------------------------------------------------------------+
