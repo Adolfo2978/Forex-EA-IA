@@ -63,6 +63,11 @@ int         glAccountsType=0; // tipo de cuenta. cobertura o red
 int         glFileLog=0;      // manejar el archivo de registro
 string      glPanelBgName="ARB_PANEL_BG";
 string      glPanelTextName="ARB_PANEL_TEXT";
+string      glPanelHeaderName="ARB_PANEL_HDR";
+
+double      glNNTrainSamples=0;
+double      glNNTrainAccuracy=0.5;
+double      glNNTrainLoss=0.0;
 
 double      glNNWeights[6]={0.0,0.15,-0.08,0.12,0.10,-0.05};
 bool        glNNReady=false;
@@ -539,6 +544,7 @@ double fnCalcTDI(string smb,ENUM_TIMEFRAMES tf,int shift);
 bool fnBuildNNFeatures(string smb,ENUM_TIMEFRAMES tf,int shift,double spreadPts,double &x1,double &x2,double &x3,double &x4,double &x5);
 bool fnTrainNN90Days(stThree &MxSmb[]);
 double fnPredictNN(string smb,double spreadPts);
+double fnNNSignalStrength(double prob);
 
 stThree  MxThree[];
 CSupport csup;
@@ -548,6 +554,11 @@ double fnClamp(double val,double mn,double mx)
    if(val<mn) return(mn);
    if(val>mx) return(mx);
    return(val);
+  }
+
+double fnNNSignalStrength(double prob)
+  {
+   return(fnClamp(MathAbs(prob-0.5)*2.0,0.0,1.0));
   }
 
 void fnUpdateAIScore(stThree &MxSmb[],int idx)
@@ -572,6 +583,7 @@ void fnDeletePanel()
   {
    ObjectDelete(0,glPanelBgName);
    ObjectDelete(0,glPanelTextName);
+   ObjectDelete(0,glPanelHeaderName);
   }
 
 int fnTFMinutes(ENUM_TIMEFRAMES tf)
@@ -675,8 +687,16 @@ bool fnTrainNN90Days(stThree &MxSmb[])
    int maxShift=MathMin(bars-3,needBars);
    if(maxShift<260) return(false);
 
+   double sumLoss=0.0;
+   int samples=0;
+   int correct=0;
+   double l2=0.0005;
+
    for(int e=0;e<inNNEpochs;e++)
      {
+      double decay=(inNNEpochs>1)?(double)e/(double)(inNNEpochs-1):0.0;
+      double lr=MathMax(inNNLearningRate*(1.0-0.35*decay),inNNLearningRate*0.25);
+
       for(int sh=maxShift;sh>=2;sh--)
         {
          double x1,x2,x3,x4,x5;
@@ -690,98 +710,190 @@ bool fnTrainNN90Days(stThree &MxSmb[])
          double y=(c1>c0)?1.0:0.0;
          double z=glNNWeights[0]+glNNWeights[1]*x1+glNNWeights[2]*x2+glNNWeights[3]*x3+glNNWeights[4]*x4+glNNWeights[5]*x5;
          double pred=fnSigmoid(z);
-         double err=(y-pred);
+         double err=fnClamp(y-pred,-1.0,1.0);
 
-         glNNWeights[0]+=inNNLearningRate*err;
-         glNNWeights[1]+=inNNLearningRate*err*x1;
-         glNNWeights[2]+=inNNLearningRate*err*x2;
-         glNNWeights[3]+=inNNLearningRate*err*x3;
-         glNNWeights[4]+=inNNLearningRate*err*x4;
-         glNNWeights[5]+=inNNLearningRate*err*x5;
+         glNNWeights[0]+=lr*err;
+         glNNWeights[1]=glNNWeights[1]*(1.0-lr*l2)+lr*err*x1;
+         glNNWeights[2]=glNNWeights[2]*(1.0-lr*l2)+lr*err*x2;
+         glNNWeights[3]=glNNWeights[3]*(1.0-lr*l2)+lr*err*x3;
+         glNNWeights[4]=glNNWeights[4]*(1.0-lr*l2)+lr*err*x4;
+         glNNWeights[5]=glNNWeights[5]*(1.0-lr*l2)+lr*err*x5;
+
+         double p=fnClamp(pred,0.000001,0.999999);
+         double loss=-(y*MathLog(p)+(1.0-y)*MathLog(1.0-p));
+         sumLoss+=loss;
+         samples++;
+         if((pred>=0.5 && y>0.5) || (pred<0.5 && y<0.5)) correct++;
         }
      }
 
-   glNNReady=true;
+   glNNReady=(samples>0);
    glNNLastTrain=TimeCurrent();
-   Print("NN entrenada con "+(string)inNNTrainingDays+" dias en "+smb+" TF "+EnumToString(inNNTimeframe));
-   return(true);
+   glNNTrainSamples=(double)samples;
+   glNNTrainAccuracy=(samples>0)?(double)correct/(double)samples:0.5;
+   glNNTrainLoss=(samples>0)?sumLoss/(double)samples:0.0;
+
+   Print("NN entrenada "+(string)inNNTrainingDays+" dias en "+smb+" TF "+EnumToString(inNNTimeframe)+
+         " | samples="+(string)samples+" acc="+DoubleToString(glNNTrainAccuracy*100.0,1)+"% loss="+DoubleToString(glNNTrainLoss,4));
+   return(glNNReady);
   }
 
 double fnPredictNN(string smb,double spreadPts)
   {
-   double x1,x2,x3,x4,x5;
    if(!glNNReady) return(0.5);
-   if(!fnBuildNNFeatures(smb,inNNTimeframe,0,spreadPts,x1,x2,x3,x4,x5)) return(0.5);
-   double z=glNNWeights[0]+glNNWeights[1]*x1+glNNWeights[2]*x2+glNNWeights[3]*x3+glNNWeights[4]*x4+glNNWeights[5]*x5;
-   return(fnSigmoid(z));
+
+   double prob=0.0;
+   double wsum=0.0;
+   double w0=0.60,w1=0.30,w2=0.10;
+   double ws[3]={w0,w1,w2};
+
+   for(int sh=0;sh<3;sh++)
+     {
+      double x1,x2,x3,x4,x5;
+      double spreadAdj=spreadPts*(1.0+0.15*sh);
+      if(!fnBuildNNFeatures(smb,inNNTimeframe,sh,spreadAdj,x1,x2,x3,x4,x5)) continue;
+      double z=glNNWeights[0]+glNNWeights[1]*x1+glNNWeights[2]*x2+glNNWeights[3]*x3+glNNWeights[4]*x4+glNNWeights[5]*x5;
+      double p=fnSigmoid(z);
+      prob+=p*ws[sh];
+      wsum+=ws[sh];
+     }
+
+   if(wsum<=0.0) return(0.5);
+   prob/=wsum;
+
+   double boost=fnClamp((glNNTrainAccuracy-0.50)*1.50,0.0,0.25);
+   prob=0.5+(prob-0.5)*(1.0+boost);
+   return(fnClamp(prob,0.01,0.99));
   }
 
 void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
   {
-   string txt=" ARBITRAJE TRIANGULAR PRO\n";
-   txt+="==========================\n";
-   txt+="Triangulos: "+(string)ArraySize(MxSmb)+"\n";
-   txt+="Abiertos: "+(string)lcOpenThree+"\n";
+   string txt="Estado IA/NN y arbitraje\n";
+   txt+="=========================================\n";
 
+   int total=ArraySize(MxSmb);
    double bestEdge=-DBL_MAX;
    int bestIdx=-1;
    double openPL=0;
    double avgScore=0;
+   double avgConf=0;
+   double avgNN=0;
    uint totalTrades=0,totalWins=0,totalLosses=0;
 
-   for(int i=ArraySize(MxSmb)-1;i>=0;i--)
+   int topIdx[3]={-1,-1,-1};
+   double topEdge[3]={-DBL_MAX,-DBL_MAX,-DBL_MAX};
+
+   for(int i=total-1;i>=0;i--)
      {
-      double edge=MathMax(MxSmb[i].PLBuy-MxSmb[i].spreadbuy,MxSmb[i].PLSell-MxSmb[i].spreadsell);
+      double edgeBuy=MxSmb[i].PLBuy-MxSmb[i].spreadbuy;
+      double edgeSell=MxSmb[i].PLSell-MxSmb[i].spreadsell;
+      double edge=MathMax(edgeBuy,edgeSell);
+
       if(edge>bestEdge)
         {
          bestEdge=edge;
          bestIdx=i;
         }
+
+      for(int p=0;p<3;p++)
+        {
+         if(edge>topEdge[p])
+           {
+            for(int q=2;q>p;q--)
+              {
+               topEdge[q]=topEdge[q-1];
+               topIdx[q]=topIdx[q-1];
+              }
+            topEdge[p]=edge;
+            topIdx[p]=i;
+            break;
+           }
+        }
+
       if(MxSmb[i].status==2) openPL+=MxSmb[i].pl;
       avgScore+=MxSmb[i].aiScore;
+      avgConf+=MxSmb[i].aiConfidence;
+      avgNN+=MxSmb[i].nnProb;
       totalTrades+=MxSmb[i].aiTrades;
       totalWins+=MxSmb[i].aiWins;
       totalLosses+=MxSmb[i].aiLosses;
      }
 
-   if(ArraySize(MxSmb)>0) avgScore/=ArraySize(MxSmb);
+   if(total>0)
+     {
+      avgScore/=total;
+      avgConf/=total;
+      avgNN/=total;
+     }
 
+   double winRate=(totalTrades>0)?(100.0*(double)totalWins/(double)totalTrades):0.0;
+   txt+="Triangulos: "+(string)total+" | Abiertos: "+(string)lcOpenThree+"\n";
    txt+="P/L abierto: "+DoubleToString(openPL,2)+"\n";
-   txt+="Score IA prom: "+DoubleToString(avgScore,3)+"\n";
-   txt+="Trades IA: "+(string)totalTrades+" (W:"+(string)totalWins+" L:"+(string)totalLosses+")\n";
-   txt+="NN: "+(inUseNeuralNet?"ON":"OFF")+"  TF:"+EnumToString(inNNTimeframe)+"\n";
-   txt+="Ult. entrenamiento: "+(glNNLastTrain>0?TimeToString(glNNLastTrain,TIME_DATE|TIME_MINUTES):"N/A")+"\n";
+   txt+="IA score/conf: "+DoubleToString(avgScore,3)+" / "+DoubleToString(avgConf,1)+"%\n";
+   txt+="NN estado: "+(inUseNeuralNet?(glNNReady?"ENTRENADA":"PENDIENTE"):"OFF")+"  TF: "+EnumToString(inNNTimeframe)+"\n";
+   txt+="NN acc/loss: "+DoubleToString(glNNTrainAccuracy*100.0,1)+"% / "+DoubleToString(glNNTrainLoss,4)+"\n";
+   txt+="NN muestras: "+DoubleToString(glNNTrainSamples,0)+"  NN prom: "+DoubleToString(avgNN*100.0,1)+"%\n";
+   txt+="Trades IA: "+(string)totalTrades+" (W:"+(string)totalWins+" L:"+(string)totalLosses+") WR:"+DoubleToString(winRate,1)+"%\n";
+   txt+="Ult train: "+(glNNLastTrain>0?TimeToString(glNNLastTrain,TIME_DATE|TIME_MINUTES):"N/A")+"\n";
 
    if(bestIdx>=0)
      {
-      txt+="--------------------------\n";
-      txt+="Mejor oportunidad:\n";
+      double edgeBuy=MxSmb[bestIdx].PLBuy-MxSmb[bestIdx].spreadbuy;
+      double edgeSell=MxSmb[bestIdx].PLSell-MxSmb[bestIdx].spreadsell;
+      string dir=(edgeBuy>=edgeSell)?"BUY":"SELL";
+      txt+="-----------------------------------------\n";
+      txt+="Mejor oportunidad: "+dir+"\n";
       txt+=MxSmb[bestIdx].smb1.name+"+"+MxSmb[bestIdx].smb2.name+"+"+MxSmb[bestIdx].smb3.name+"\n";
-      txt+="PLBuy: "+DoubleToString(MxSmb[bestIdx].PLBuy,2)+" / Coste: "+DoubleToString(MxSmb[bestIdx].spreadbuy,2)+"\n";
-      txt+="PLSell: "+DoubleToString(MxSmb[bestIdx].PLSell,2)+" / Coste: "+DoubleToString(MxSmb[bestIdx].spreadsell,2)+"\n";
-      txt+="Confianza IA: "+DoubleToString(MxSmb[bestIdx].aiConfidence,1)+"%\n";
-      txt+="NN Prob: "+DoubleToString(MxSmb[bestIdx].nnProb*100.0,1)+"%  MM:"+DoubleToString(MxSmb[bestIdx].mmBias,0)+"\n";
+      txt+="Edge B/S: "+DoubleToString(edgeBuy,2)+" / "+DoubleToString(edgeSell,2)+"\n";
+      txt+="NN: "+DoubleToString(MxSmb[bestIdx].nnProb*100.0,1)+"%  Fuerza: "+DoubleToString(fnNNSignalStrength(MxSmb[bestIdx].nnProb)*100.0,1)+"%\n";
+      txt+="Conf IA: "+DoubleToString(MxSmb[bestIdx].aiConfidence,1)+"%  MM: "+DoubleToString(MxSmb[bestIdx].mmBias,0)+"\n";
+
+      txt+="Top oportunidades:\n";
+      for(int t=0;t<3;t++)
+        {
+         int idx=topIdx[t];
+         if(idx<0) continue;
+         double eb=MxSmb[idx].PLBuy-MxSmb[idx].spreadbuy;
+         double es=MxSmb[idx].PLSell-MxSmb[idx].spreadsell;
+         string d=(eb>=es)?"B":"S";
+         txt+=(string)(t+1)+") "+d+" "+MxSmb[idx].smb1.name+"+"+MxSmb[idx].smb2.name+"+"+MxSmb[idx].smb3.name;
+         txt+=" edge:"+DoubleToString(topEdge[t],2)+" nn:"+DoubleToString(MxSmb[idx].nnProb*100.0,0)+"%\n";
+        }
      }
+
+   color panelColor=background_color;
+   if(bestEdge>0.0) panelColor=(color)C'16,52,33';
+   if(bestEdge<0.0) panelColor=(color)C'54,24,24';
 
    if(ObjectFind(0,glPanelBgName)<0) ObjectCreate(0,glPanelBgName,OBJ_RECTANGLE_LABEL,0,0,0);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_XDISTANCE,10);
-   ObjectSetInteger(0,glPanelBgName,OBJPROP_YDISTANCE,20);
-   ObjectSetInteger(0,glPanelBgName,OBJPROP_XSIZE,350);
-   ObjectSetInteger(0,glPanelBgName,OBJPROP_YSIZE,250);
-   ObjectSetInteger(0,glPanelBgName,OBJPROP_BGCOLOR,background_color);
-   ObjectSetInteger(0,glPanelBgName,OBJPROP_COLOR,clrBlack);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_YDISTANCE,18);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_XSIZE,430);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_YSIZE,360);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_BGCOLOR,panelColor);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_COLOR,clrDimGray);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_BACK,false);
+
+   if(ObjectFind(0,glPanelHeaderName)<0) ObjectCreate(0,glPanelHeaderName,OBJ_LABEL,0,0,0);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_XDISTANCE,24);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_YDISTANCE,24);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_COLOR,clrGold);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_FONTSIZE,11);
+   ObjectSetString(0,glPanelHeaderName,OBJPROP_FONT,"Segoe UI Bold");
+   ObjectSetString(0,glPanelHeaderName,OBJPROP_TEXT,"ARBITRAJE TRIANGULAR IA/NN");
 
    if(ObjectFind(0,glPanelTextName)<0) ObjectCreate(0,glPanelTextName,OBJ_LABEL,0,0,0);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_XDISTANCE,20);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_YDISTANCE,30);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_COLOR,clrWhite);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_XDISTANCE,24);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_YDISTANCE,48);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_COLOR,clrWhiteSmoke);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_FONTSIZE,9);
    ObjectSetString(0,glPanelTextName,OBJPROP_FONT,"Consolas");
    ObjectSetString(0,glPanelTextName,OBJPROP_TEXT,txt);
   }
+
 
 void fnWarning(double lot,int &fh)
   {
@@ -1400,8 +1512,13 @@ void fnCalcDelta(stThree &MxSmb[],double prft,string cmnt,int magic,double lot,u
       if(ema50Now>ema200Now && tdiNow>0) MxSmb[i].mmBias=1;
       if(ema50Now<ema200Now && tdiNow<0) MxSmb[i].mmBias=-1;
 
-      bool nnAllowBuy=(!inUseNeuralNet || (MxSmb[i].nnProb>=inNNBuyThreshold));
-      bool nnAllowSell=(!inUseNeuralNet || (MxSmb[i].nnProb<=inNNSellThreshold));
+      double nnStrength=fnNNSignalStrength(MxSmb[i].nnProb);
+      double minNNStrength=0.08+inAIAgressividad*0.22;
+      double dynBuyThr=fnClamp(inNNBuyThreshold-0.05*(MxSmb[i].aiConfidence/100.0),0.50,0.85);
+      double dynSellThr=fnClamp(inNNSellThreshold+0.05*(MxSmb[i].aiConfidence/100.0),0.15,0.50);
+
+      bool nnAllowBuy=(!inUseNeuralNet || (MxSmb[i].nnProb>=dynBuyThr && nnStrength>=minNNStrength));
+      bool nnAllowSell=(!inUseNeuralNet || (MxSmb[i].nnProb<=dynSellThr && nnStrength>=minNNStrength));
       bool mmAllowBuy=(!inUseMMMethod || MxSmb[i].mmBias>=0);
       bool mmAllowSell=(!inUseMMMethod || MxSmb[i].mmBias<=0);
 
