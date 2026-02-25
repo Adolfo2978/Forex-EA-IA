@@ -258,6 +258,54 @@ bool OrderClose(int ticket,double lots,double price,int slippage)
   }
 
 
+int OrderSend(string symbol,int cmd,double volume,double price,int slippage,double stoploss,double takeprofit,string comment="",int magic=0,datetime expiration=0,color arrow_color=clrNONE)
+  {
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+
+   req.action=TRADE_ACTION_DEAL;
+   req.symbol=symbol;
+   req.volume=volume;
+   req.deviation=slippage;
+   req.magic=magic;
+   req.comment=comment;
+   req.price=price;
+
+   if(cmd==OP_BUY)
+      req.type=ORDER_TYPE_BUY;
+   else
+   if(cmd==OP_SELL)
+      req.type=ORDER_TYPE_SELL;
+   else
+      return(-1);
+
+   if(stoploss>0.0) req.sl=stoploss;
+   if(takeprofit>0.0) req.tp=takeprofit;
+
+   ENUM_SYMBOL_TRADE_EXECUTION exec_mode=(ENUM_SYMBOL_TRADE_EXECUTION)SymbolInfoInteger(symbol,SYMBOL_TRADE_EXEMODE);
+   if(exec_mode==SYMBOL_TRADE_EXECUTION_EXCHANGE || exec_mode==SYMBOL_TRADE_EXECUTION_INSTANT || exec_mode==SYMBOL_TRADE_EXECUTION_REQUEST)
+      req.type_filling=ORDER_FILLING_FOK;
+   else
+      req.type_filling=ORDER_FILLING_IOC;
+
+   if(expiration>0)
+     {
+      req.type_time=ORDER_TIME_SPECIFIED;
+      req.expiration=expiration;
+     }
+
+   if(!::OrderSend(req,res))
+      return(-1);
+
+   if(res.retcode==TRADE_RETCODE_DONE || res.retcode==TRADE_RETCODE_PLACED || res.retcode==TRADE_RETCODE_DONE_PARTIAL)
+      return((int)res.order);
+
+   return(-1);
+  }
+
+
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
