@@ -12,7 +12,7 @@
 #property description "3: Antes de realizar la prueba, debe crear un archivo con símbolos"
 #property description "4: Para el modo de demostración, utilice el triángulo de forma predeterminada: EURUSD+GBPUSD+EURGBP"
 //#property icon "\\Images\\arbitraje.ico"
-extern color   background_color = Teal; // Color de fondo de información
+input color    background_color=Teal; // Color de fondo de información
 #property strict
 
 // macros
@@ -47,10 +47,282 @@ input       double      inLot=      0.01;       // Volumen comercial
 input       ushort      inMaxThree= 3;          //Together triangles open
 input      int         inMagic=    300;        //EA number
 input      string      inCmnt=     "Arbitraje T ";       //Comment
+input      bool        inUseIA=    true;       // Activar filtro adaptativo (IA)
+input      double      inAIAgressividad=0.35;  // 0.0 a 1.0, sensibilidad del filtro IA
+input      bool        inUseNeuralNet=true;    // Activar red neuronal
+input      int         inNNTrainingDays=90;    // Días históricos para entrenamiento
+input      ENUM_TIMEFRAMES inNNTimeframe=PERIOD_M15; // Timeframe intradía
+input      int         inNNEpochs=4;           // Épocas de entrenamiento
+input      double      inNNLearningRate=0.03;  // Learning rate
+input      double      inNNBuyThreshold=0.56;  // Umbral probabilidad compra
+input      double      inNNSellThreshold=0.44; // Umbral probabilidad venta
+input      bool        inUseMMMethod=true;     // Filtro Market Maker
 
+input      bool        inPanelVisible=true;      // Mostrar panel de la derecha
+input      ENUM_BASE_CORNER inPanelCorner=CORNER_RIGHT_UPPER; // Esquina del panel
+input      int         inPanelX=10;              // Distancia X del panel
+input      int         inPanelY=6;               // Distancia Y del panel
+input      int         inPanelWidth=430;         // Ancho objetivo del panel
+input      int         inPanelHeight=360;        // Alto objetivo del panel
+input      int         inPanelPadding=14;        // Padding interno
+input      int         inPanelHeaderFont=10;     // Tamaño fuente cabecera
+input      int         inPanelTextFont=9;        // Tamaño fuente texto
+input      color       inPanelHeaderColor=clrGold; // Color cabecera
+input      color       inPanelTextColor=clrWhiteSmoke; // Color texto
+input      string      inPanelNamePrefix="ARB_PANEL"; // Prefijo de objetos del panel
 
 int         glAccountsType=0; // tipo de cuenta. cobertura o red
 int         glFileLog=0;      // manejar el archivo de registro
+string      glPanelBgName="ARB_PANEL_BG";
+string      glPanelTextName="ARB_PANEL_TEXT";
+string      glPanelHeaderName="ARB_PANEL_HDR";
+
+double      glNNTrainSamples=0;
+double      glNNTrainAccuracy=0.5;
+double      glNNTrainLoss=0.0;
+
+double      glNNWeights[6]={0.0,0.15,-0.08,0.12,0.10,-0.05};
+bool        glNNReady=false;
+datetime    glNNLastTrain=0;
+
+
+#ifndef SELECT_BY_POS
+#define SELECT_BY_POS 0
+#endif
+#ifndef SELECT_BY_TICKET
+#define SELECT_BY_TICKET 1
+#endif
+#ifndef MODE_TRADES
+#define MODE_TRADES 0
+#endif
+#ifndef MODE_MARGINREQUIRED
+#define MODE_MARGINREQUIRED 32
+#endif
+#ifndef OP_BUY
+#define OP_BUY 0
+#endif
+#ifndef OP_SELL
+#define OP_SELL 1
+#endif
+
+ulong glSelectedTicket=0;
+bool  glSelectedIsPosition=false;
+
+double MarketInfo(string symbol,int mode)
+  {
+   if(mode==MODE_MARGINREQUIRED)
+     {
+      double margin=0.0;
+      if(SymbolInfoDouble(symbol,SYMBOL_MARGIN_INITIAL,margin) && margin>0.0)
+         return(margin);
+
+      double ask=0.0,contract_size=0.0;
+      long leverage=AccountInfoInteger(ACCOUNT_LEVERAGE);
+      SymbolInfoDouble(symbol,SYMBOL_ASK,ask);
+      SymbolInfoDouble(symbol,SYMBOL_TRADE_CONTRACT_SIZE,contract_size);
+      if(leverage<=0) leverage=1;
+      return((ask*contract_size)/(double)leverage);
+     }
+   return(0.0);
+  }
+
+bool OrderSelect(int index,int select,int pool)
+  {
+   glSelectedTicket=0;
+   glSelectedIsPosition=false;
+
+   if(select==SELECT_BY_POS)
+     {
+      if(index>=0 && index<PositionsTotal())
+        {
+         ulong pt=PositionGetTicket(index);
+         if(pt>0 && PositionSelectByTicket(pt))
+           {
+            glSelectedTicket=pt;
+            glSelectedIsPosition=true;
+            return(true);
+           }
+        }
+
+      if(index>=0 && index<OrdersTotal())
+        {
+         ulong ot=OrderGetTicket(index);
+         if(ot>0 && ::OrderSelect(ot))
+           {
+            glSelectedTicket=ot;
+            glSelectedIsPosition=false;
+            return(true);
+           }
+        }
+      return(false);
+     }
+
+   if(select==SELECT_BY_TICKET)
+     {
+      ulong t=(ulong)index;
+      if(PositionSelectByTicket(t))
+        {
+         glSelectedTicket=t;
+         glSelectedIsPosition=true;
+         return(true);
+        }
+      if(::OrderSelect(t))
+        {
+         glSelectedTicket=t;
+         glSelectedIsPosition=false;
+         return(true);
+        }
+     }
+   return(false);
+  }
+
+int OrderMagicNumber()
+  {
+   if(glSelectedTicket==0) return(0);
+   if(glSelectedIsPosition)
+      return((int)PositionGetInteger(POSITION_MAGIC));
+   return((int)OrderGetInteger(ORDER_MAGIC));
+  }
+
+string OrderSymbol()
+  {
+   if(glSelectedTicket==0) return("");
+   if(glSelectedIsPosition)
+      return(PositionGetString(POSITION_SYMBOL));
+   return(OrderGetString(ORDER_SYMBOL));
+  }
+
+int OrderTicket()
+  {
+   return((int)glSelectedTicket);
+  }
+
+datetime OrderCloseTime()
+  {
+   if(glSelectedTicket==0) return(0);
+   if(glSelectedIsPosition) return(0);
+   return((datetime)OrderGetInteger(ORDER_TIME_DONE));
+  }
+
+double OrderProfit()
+  {
+   if(glSelectedTicket==0) return(0.0);
+   if(glSelectedIsPosition)
+      return(PositionGetDouble(POSITION_PROFIT));
+   return(0.0);
+  }
+
+datetime OrderOpenTime()
+  {
+   if(glSelectedTicket==0) return(0);
+   if(glSelectedIsPosition)
+      return((datetime)PositionGetInteger(POSITION_TIME));
+   return((datetime)OrderGetInteger(ORDER_TIME_SETUP));
+  }
+
+int OrderType()
+  {
+   if(glSelectedTicket==0) return(-1);
+   if(glSelectedIsPosition)
+     {
+      ENUM_POSITION_TYPE ptype=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if(ptype==POSITION_TYPE_BUY) return(OP_BUY);
+      if(ptype==POSITION_TYPE_SELL) return(OP_SELL);
+      return(-1);
+     }
+
+   ENUM_ORDER_TYPE otype=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+   if(otype==ORDER_TYPE_BUY) return(OP_BUY);
+   if(otype==ORDER_TYPE_SELL) return(OP_SELL);
+   return(-1);
+  }
+
+double OrderLots()
+  {
+   if(glSelectedTicket==0) return(0.0);
+   if(glSelectedIsPosition)
+      return(PositionGetDouble(POSITION_VOLUME));
+   return(OrderGetDouble(ORDER_VOLUME_CURRENT));
+  }
+
+bool OrderClose(int ticket,double lots,double price,int slippage)
+  {
+   ulong t=(ulong)ticket;
+   if(!PositionSelectByTicket(t))
+      return(false);
+
+   string symbol=PositionGetString(POSITION_SYMBOL);
+   ENUM_POSITION_TYPE ptype=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+
+   req.action=TRADE_ACTION_DEAL;
+   req.position=t;
+   req.symbol=symbol;
+   req.volume=lots;
+   req.deviation=slippage;
+   req.price=price;
+   req.type=(ptype==POSITION_TYPE_BUY ? ORDER_TYPE_SELL : ORDER_TYPE_BUY);
+   req.type_filling=ORDER_FILLING_IOC;
+
+   if(!OrderSend(req,res))
+      return(false);
+
+   return(res.retcode==TRADE_RETCODE_DONE || res.retcode==TRADE_RETCODE_PLACED);
+  }
+
+
+int OrderSend(string symbol,int cmd,double volume,double price,int slippage,double stoploss,double takeprofit,string comment="",int magic=0,datetime expiration=0,color arrow_color=clrNONE)
+  {
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+
+   req.action=TRADE_ACTION_DEAL;
+   req.symbol=symbol;
+   req.volume=volume;
+   req.deviation=slippage;
+   req.magic=magic;
+   req.comment=comment;
+   req.price=price;
+
+   if(cmd==OP_BUY)
+      req.type=ORDER_TYPE_BUY;
+   else
+   if(cmd==OP_SELL)
+      req.type=ORDER_TYPE_SELL;
+   else
+      return(-1);
+
+   if(stoploss>0.0) req.sl=stoploss;
+   if(takeprofit>0.0) req.tp=takeprofit;
+
+   ENUM_SYMBOL_TRADE_EXECUTION exec_mode=(ENUM_SYMBOL_TRADE_EXECUTION)SymbolInfoInteger(symbol,SYMBOL_TRADE_EXEMODE);
+   if(exec_mode==SYMBOL_TRADE_EXECUTION_EXCHANGE || exec_mode==SYMBOL_TRADE_EXECUTION_INSTANT || exec_mode==SYMBOL_TRADE_EXECUTION_REQUEST)
+      req.type_filling=ORDER_FILLING_FOK;
+   else
+      req.type_filling=ORDER_FILLING_IOC;
+
+   if(expiration>0)
+     {
+      req.type_time=ORDER_TIME_SPECIFIED;
+      req.expiration=expiration;
+     }
+
+   if(!::OrderSend(req,res))
+      return(-1);
+
+   if(res.retcode==TRADE_RETCODE_DONE || res.retcode==TRADE_RETCODE_PLACED || res.retcode==TRADE_RETCODE_DONE_PARTIAL)
+      return((int)res.order);
+
+   return(-1);
+  }
+
+
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -69,6 +341,14 @@ int OnInit()
      }
 
    Print("===============================================\nStart EA: "+MQLInfoString(MQL_PROGRAM_NAME));
+
+   string panelBase=inPanelNamePrefix;
+   if(panelBase=="") panelBase="ARB_PANEL";
+
+   string panelSuffix="_"+(string)ChartID()+"_"+(string)inMagic;
+   glPanelBgName=panelBase+"_BG"+panelSuffix;
+   glPanelTextName=panelBase+"_TEXT"+panelSuffix;
+   glPanelHeaderName=panelBase+"_HDR"+panelSuffix;
 
    fnWarning(inLot,glFileLog);                      //varias comprobaciones durante el lanzamiento del robot
    fnSetThree(MxThree,inMode);                        //triángulos compuestos
@@ -98,6 +378,8 @@ int OnInit()
       fnCreateFileSymbols(MxThree,glFileLog);
 
    fnRestart(MxThree,inMagic);                     //restaurar triángulos después de reiniciar el robot
+   if(inUseNeuralNet)
+      fnTrainNN90Days(MxThree);
 
    if(ArraySize(MxThree)<=0)
      {
@@ -109,6 +391,7 @@ int OnInit()
   }
 void OnDeinit(const int reason)
   {
+   fnDeletePanel();
    FileClose(glFileLog);
    Print("Stop EA: "+MQLInfoString(MQL_PROGRAM_NAME)+"\n===============================================");
    Comment("");
@@ -119,6 +402,8 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   if(inUseNeuralNet && (TimeCurrent()-glNNLastTrain)>43200)
+      fnTrainNN90Days(MxThree);
 
 // primero, cuente el número de triángulos abiertos. Esto ahorrará significativamente recursos de la computadora.
 // porque Si hay una restricción y la hemos alcanzado, entonces no consideramos el deslizamiento, etc.      
@@ -127,7 +412,9 @@ void OnTick()
    for(int j=ArraySize(MxThree)-1;j>=0;j--)
       if(MxThree[j].status!=0) OpenThree++; //también consideramos cerrado, porque pueden colgarse durante mucho tiempo, pero de todos modos se consideran
 
-   if(DayOfWeek()==5 && Hour()>=15); else   //jueves después de las 18 no abren
+   MqlDateTime now_dt;
+   TimeToStruct(TimeCurrent(),now_dt);
+   if(!(now_dt.day_of_week==5 && now_dt.hour>=15))   // viernes después de las 15 no abren
      {
       if(inMaxThree==0 || (inMaxThree>0 && inMaxThree>OpenThree))
          fnCalcDelta(MxThree,inProfit,inCmnt,inMagic,inLot,inMaxThree,OpenThree); // consideramos la discrepancia e inmediatamente abrimos         
@@ -254,19 +541,462 @@ struct stThree
    double            PLSell;           // ¿Cuánto puedes ganar si vendes un triángulo?
    double            spreadbuy;           // Costo total de los tres diferenciales. con comisión
    double            spreadsell;           // Costo total de los tres diferenciales. con comisión
-                     stThree(){status=0;magic=0;timeopen=0;}
+   double            aiScore;            // Score adaptativo IA [-1..1]
+   uint              aiTrades;           // Total de operaciones cerradas
+   uint              aiWins;             // Cierres positivos
+   uint              aiLosses;           // Cierres negativos
+   double            aiConfidence;       // Confianza actual de señal [0..100]
+   double            lastPL;             // Último resultado cerrado
+   double            nnProb;             // Probabilidad de red neuronal [0..1]
+   double            mmBias;             // Sesgo market maker (-1 sell, +1 buy)
+                     stThree(){status=0;magic=0;timeopen=0;aiScore=0;aiTrades=0;aiWins=0;aiLosses=0;aiConfidence=0;lastPL=0;nnProb=0.5;mmBias=0;}
   };
 
-  // Modos de trabajo del EA  
+double fnClamp(double val,double mn,double mx);
+void fnUpdateAIScore(stThree &MxSmb[],int idx);
+void fnDeletePanel();
+void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree);
+int fnTFMinutes(ENUM_TIMEFRAMES tf);
+double fnSigmoid(double x);
+double fnEMAFromClose(string smb,ENUM_TIMEFRAMES tf,int period,int shift);
+double fnRSIFromClose(string smb,ENUM_TIMEFRAMES tf,int period,int shift);
+double fnCalcTDI(string smb,ENUM_TIMEFRAMES tf,int shift);
+bool fnBuildNNFeatures(string smb,ENUM_TIMEFRAMES tf,int shift,double spreadPts,double &x1,double &x2,double &x3,double &x4,double &x5);
+bool fnTrainNN90Days(stThree &MxSmb[]);
+double fnPredictNN(string smb,double spreadPts);
+double fnNNSignalStrength(double prob);
 
-stThree  MxThree[];           // matriz principal donde se almacenan los triángulos de trabajo y todos los datos adicionales necesarios
+stThree  MxThree[];
+CSupport csup;
 
-CSupport       csup;          // matriz principal donde se almacenan los triángulos de trabajo y todos los datos adicionales necesarios
+double fnClamp(double val,double mn,double mx)
+  {
+   if(val<mn) return(mn);
+   if(val>mx) return(mx);
+   return(val);
+  }
+
+double fnNNSignalStrength(double prob)
+  {
+   return(fnClamp(MathAbs(prob-0.5)*2.0,0.0,1.0));
+  }
+
+void fnUpdateAIScore(stThree &MxSmb[],int idx)
+  {
+   if(idx<0 || idx>=ArraySize(MxSmb)) return;
+   MxSmb[idx].aiTrades++;
+   MxSmb[idx].lastPL=MxSmb[idx].pl;
+
+   double outcome=-1.0;
+   if(MxSmb[idx].pl>inProfit && MxSmb[idx].pl>0)
+     {
+      outcome=1.0;
+      MxSmb[idx].aiWins++;
+     }
+   else MxSmb[idx].aiLosses++;
+
+   MxSmb[idx].aiScore=0.85*MxSmb[idx].aiScore+0.15*outcome;
+   MxSmb[idx].aiScore=fnClamp(MxSmb[idx].aiScore,-1.0,1.0);
+  }
+
+void fnDeletePanel()
+  {
+   ObjectDelete(0,glPanelBgName);
+   ObjectDelete(0,glPanelTextName);
+   ObjectDelete(0,glPanelHeaderName);
+  }
+
+int fnTFMinutes(ENUM_TIMEFRAMES tf)
+  {
+   switch(tf)
+     {
+      case PERIOD_M1: return 1;
+      case PERIOD_M5: return 5;
+      case PERIOD_M15: return 15;
+      case PERIOD_M30: return 30;
+      case PERIOD_H1: return 60;
+      case PERIOD_H4: return 240;
+      case PERIOD_D1: return 1440;
+      default: return 15;
+     }
+  }
+
+double fnSigmoid(double x)
+  {
+   if(x>35.0) return(1.0);
+   if(x<-35.0) return(0.0);
+   return(1.0/(1.0+MathExp(-x)));
+  }
+
+double fnEMAFromClose(string smb,ENUM_TIMEFRAMES tf,int period,int shift)
+  {
+   if(period<=1) return(iClose(smb,tf,shift));
+   int warmup=period*4;
+   int startShift=shift+warmup;
+   double ema=iClose(smb,tf,startShift);
+   if(ema<=0) return(0.0);
+   double alpha=2.0/(period+1.0);
+   for(int sh=startShift-1;sh>=shift;sh--)
+     {
+      double c=iClose(smb,tf,sh);
+      if(c<=0) return(0.0);
+      ema=alpha*c+(1.0-alpha)*ema;
+     }
+   return(ema);
+  }
+
+double fnRSIFromClose(string smb,ENUM_TIMEFRAMES tf,int period,int shift)
+  {
+   double gain=0.0,loss=0.0;
+   for(int k=shift+period;k>shift;k--)
+     {
+      double c1=iClose(smb,tf,k-1);
+      double c0=iClose(smb,tf,k);
+      if(c1<=0 || c0<=0) return(50.0);
+      double d=c1-c0;
+      if(d>=0) gain+=d; else loss-=d;
+     }
+   if(loss<=0.0) return(100.0);
+   double rs=(gain/period)/(loss/period);
+   return(100.0-(100.0/(1.0+rs)));
+  }
+
+double fnCalcTDI(string smb,ENUM_TIMEFRAMES tf,int shift)
+  {
+   double rsi=fnRSIFromClose(smb,tf,13,shift);
+   double sum=0.0;
+   int n=0;
+   for(int k=shift;k<shift+7;k++)
+     {
+      sum+=fnRSIFromClose(smb,tf,13,k);
+      n++;
+     }
+   if(n<=0) return(0.0);
+   double signal=sum/n;
+   return((rsi-signal)/20.0);
+  }
+
+bool fnBuildNNFeatures(string smb,ENUM_TIMEFRAMES tf,int shift,double spreadPts,double &x1,double &x2,double &x3,double &x4,double &x5)
+  {
+   double p=SymbolInfoDouble(smb,SYMBOL_POINT);
+   if(p<=0) p=0.0001;
+
+   double ema50=fnEMAFromClose(smb,tf,50,shift);
+   double ema200=fnEMAFromClose(smb,tf,200,shift);
+   double ema50prev=fnEMAFromClose(smb,tf,50,shift+5);
+   double rsi=fnRSIFromClose(smb,tf,13,shift);
+   if(ema50<=0 || ema200<=0 || ema50prev<=0) return(false);
+
+   x1=fnClamp((ema50-ema200)/(50.0*p),-3.0,3.0);
+   x2=fnClamp((ema50-ema50prev)/(10.0*p),-3.0,3.0);
+   x3=fnClamp((rsi-50.0)/25.0,-2.0,2.0);
+   x4=fnClamp(fnCalcTDI(smb,tf,shift),-2.0,2.0);
+   x5=fnClamp(spreadPts/50.0,0.0,2.0);
+   return(true);
+  }
+
+bool fnTrainNN90Days(stThree &MxSmb[])
+  {
+   if(ArraySize(MxSmb)<=0) return(false);
+
+   string smb="";
+   int bestBars=0;
+   for(int i=0;i<ArraySize(MxSmb);i++)
+     {
+      string cand=MxSmb[i].smb1.name;
+      if(cand=="" || !fnSmbCheck(cand)) continue;
+      int b=iBars(cand,inNNTimeframe);
+      if(b>bestBars)
+        {
+         bestBars=b;
+         smb=cand;
+        }
+     }
+   if(smb=="")
+     {
+      Print("NN no entrenada: sin simbolos validos para entrenamiento.");
+      return(false);
+     }
+
+   int tfMin=fnTFMinutes(inNNTimeframe);
+   int needBars=(inNNTrainingDays*1440)/MathMax(tfMin,1)+260;
+   int bars=iBars(smb,inNNTimeframe);
+   int maxShift=MathMin(bars-3,needBars);
+
+   int minTrainBars=(int)MathMax(70,MathMin(260,needBars/3));
+   if(maxShift<minTrainBars)
+     {
+      Print("NN no entrenada: barras insuficientes en "+smb+" TF "+EnumToString(inNNTimeframe)+
+            " bars="+(string)bars+" req="+(string)minTrainBars);
+      return(false);
+     }
+
+   double sumLoss=0.0;
+   int samples=0;
+   int correct=0;
+   double l2=0.0005;
+
+   for(int e=0;e<inNNEpochs;e++)
+     {
+      double decay=(inNNEpochs>1)?(double)e/(double)(inNNEpochs-1):0.0;
+      double lr=MathMax(inNNLearningRate*(1.0-0.35*decay),inNNLearningRate*0.25);
+
+      for(int sh=maxShift;sh>=2;sh--)
+        {
+         double x1,x2,x3,x4,x5;
+         double spreadPts=(double)SymbolInfoInteger(smb,SYMBOL_SPREAD);
+         if(!fnBuildNNFeatures(smb,inNNTimeframe,sh,spreadPts,x1,x2,x3,x4,x5)) continue;
+
+         double c0=iClose(smb,inNNTimeframe,sh);
+         double c1=iClose(smb,inNNTimeframe,sh-1);
+         if(c0==0 || c1==0) continue;
+
+         double y=(c1>c0)?1.0:0.0;
+         double z=glNNWeights[0]+glNNWeights[1]*x1+glNNWeights[2]*x2+glNNWeights[3]*x3+glNNWeights[4]*x4+glNNWeights[5]*x5;
+         double pred=fnSigmoid(z);
+         double err=fnClamp(y-pred,-1.0,1.0);
+
+         glNNWeights[0]+=lr*err;
+         glNNWeights[1]=glNNWeights[1]*(1.0-lr*l2)+lr*err*x1;
+         glNNWeights[2]=glNNWeights[2]*(1.0-lr*l2)+lr*err*x2;
+         glNNWeights[3]=glNNWeights[3]*(1.0-lr*l2)+lr*err*x3;
+         glNNWeights[4]=glNNWeights[4]*(1.0-lr*l2)+lr*err*x4;
+         glNNWeights[5]=glNNWeights[5]*(1.0-lr*l2)+lr*err*x5;
+
+         double p=fnClamp(pred,0.000001,0.999999);
+         double loss=-(y*MathLog(p)+(1.0-y)*MathLog(1.0-p));
+         sumLoss+=loss;
+         samples++;
+         if((pred>=0.5 && y>0.5) || (pred<0.5 && y<0.5)) correct++;
+        }
+     }
+
+   glNNReady=(samples>0);
+   glNNLastTrain=TimeCurrent();
+   glNNTrainSamples=(double)samples;
+   glNNTrainAccuracy=(samples>0)?(double)correct/(double)samples:0.5;
+   glNNTrainLoss=(samples>0)?sumLoss/(double)samples:0.0;
+
+   Print("NN entrenada "+(string)inNNTrainingDays+" dias en "+smb+" TF "+EnumToString(inNNTimeframe)+
+         " | samples="+(string)samples+" acc="+DoubleToString(glNNTrainAccuracy*100.0,1)+"% loss="+DoubleToString(glNNTrainLoss,4));
+   return(glNNReady);
+  }
+
+double fnPredictNN(string smb,double spreadPts)
+  {
+   if(!glNNReady) return(0.5);
+
+   double prob=0.0;
+   double wsum=0.0;
+   double w0=0.60,w1=0.30,w2=0.10;
+   double ws[3]={w0,w1,w2};
+
+   for(int sh=0;sh<3;sh++)
+     {
+      double x1,x2,x3,x4,x5;
+      double spreadAdj=spreadPts*(1.0+0.15*sh);
+      if(!fnBuildNNFeatures(smb,inNNTimeframe,sh,spreadAdj,x1,x2,x3,x4,x5)) continue;
+      double z=glNNWeights[0]+glNNWeights[1]*x1+glNNWeights[2]*x2+glNNWeights[3]*x3+glNNWeights[4]*x4+glNNWeights[5]*x5;
+      double p=fnSigmoid(z);
+      prob+=p*ws[sh];
+      wsum+=ws[sh];
+     }
+
+   if(wsum<=0.0) return(0.5);
+   prob/=wsum;
+
+   double boost=fnClamp((glNNTrainAccuracy-0.50)*1.50,0.0,0.25);
+   prob=0.5+(prob-0.5)*(1.0+boost);
+   return(fnClamp(prob,0.01,0.99));
+  }
+
+void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
+  {
+   if(!inPanelVisible)
+     {
+      fnDeletePanel();
+      return;
+     }
+
+   long chartW=0,chartH=0;
+   ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0,chartW);
+   ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0,chartH);
+   if(chartW<=0) chartW=inPanelWidth;
+   if(chartH<=0) chartH=inPanelHeight;
+
+   int safePadding=(int)MathMax(6,MathMin(40,inPanelPadding));
+   int usableW=(int)MathMax(120,chartW-2);
+   int usableH=(int)MathMax(140,chartH-2);
+   int panelW=(int)MathMax(180,MathMin((double)usableW,(double)inPanelWidth));
+   int panelH=(int)MathMax(160,MathMin((double)usableH,(double)inPanelHeight));
+
+   int maxX=(int)MathMax(0,chartW-panelW);
+   int maxY=(int)MathMax(0,chartH-panelH);
+   int xDist=(int)MathMin((double)MathMax(0,inPanelX),(double)maxX);
+   int yDist=(int)MathMin((double)MathMax(0,inPanelY),(double)maxY);
+   bool compactPanel=(panelW<300 || panelH<240);
+
+   int headerFont=(int)MathMax(7,MathMin(18,inPanelHeaderFont));
+   int textFont=(int)MathMax(6,MathMin(16,inPanelTextFont));
+   if(compactPanel)
+     {
+      headerFont=(int)MathMax(7,headerFont-1);
+      textFont=(int)MathMax(6,textFont-1);
+     }
+
+   int total=ArraySize(MxSmb);
+   double bestEdge=-DBL_MAX;
+   int bestIdx=-1;
+   double openPL=0;
+   double avgScore=0;
+   double avgConf=0;
+   double avgNN=0;
+   uint totalTrades=0,totalWins=0,totalLosses=0;
+
+   int topIdx[3]={-1,-1,-1};
+   double topEdge[3]={-DBL_MAX,-DBL_MAX,-DBL_MAX};
+
+   for(int i=total-1;i>=0;i--)
+     {
+      double edgeBuy=MxSmb[i].PLBuy-MxSmb[i].spreadbuy;
+      double edgeSell=MxSmb[i].PLSell-MxSmb[i].spreadsell;
+      double edge=MathMax(edgeBuy,edgeSell);
+
+      if(edge>bestEdge)
+        {
+         bestEdge=edge;
+         bestIdx=i;
+        }
+
+      for(int p=0;p<3;p++)
+        {
+         if(edge>topEdge[p])
+           {
+            for(int q=2;q>p;q--)
+              {
+               topEdge[q]=topEdge[q-1];
+               topIdx[q]=topIdx[q-1];
+              }
+            topEdge[p]=edge;
+            topIdx[p]=i;
+            break;
+           }
+        }
+
+      if(MxSmb[i].status==2) openPL+=MxSmb[i].pl;
+      avgScore+=MxSmb[i].aiScore;
+      avgConf+=MxSmb[i].aiConfidence;
+      avgNN+=MxSmb[i].nnProb;
+      totalTrades+=MxSmb[i].aiTrades;
+      totalWins+=MxSmb[i].aiWins;
+      totalLosses+=MxSmb[i].aiLosses;
+     }
+
+   if(total>0)
+     {
+      avgScore/=total;
+      avgConf/=total;
+      avgNN/=total;
+     }
+
+   double winRate=(totalTrades>0)?(100.0*(double)totalWins/(double)totalTrades):0.0;
+   double nnAccPct=glNNTrainAccuracy*100.0;
+   double nnStrengthAvg=fnNNSignalStrength(avgNN)*100.0;
+
+   string txt="";
+   if(compactPanel)
+     {
+      txt+="Tri:"+(string)total+" Open:"+(string)lcOpenThree+" PL:"+DoubleToString(openPL,2)+"\n";
+      txt+="NN "+(inUseNeuralNet?(glNNReady?"OK":"WAIT"):"OFF")+" Acc:"+DoubleToString(nnAccPct,1)+"%\n";
+      txt+="Loss:"+DoubleToString(glNNTrainLoss,4)+" Samp:"+DoubleToString(glNNTrainSamples,0)+"\n";
+      txt+="NNavg:"+DoubleToString(avgNN*100.0,1)+"% Pow:"+DoubleToString(nnStrengthAvg,1)+"%\n";
+      txt+="IA sc/conf:"+DoubleToString(avgScore,2)+"/"+DoubleToString(avgConf,0)+"% WR:"+DoubleToString(winRate,1)+"%\n";
+      txt+="Train:"+(glNNLastTrain>0?TimeToString(glNNLastTrain,TIME_MINUTES):"N/A")+"\n";
+     }
+   else
+     {
+      txt+="Estado IA/NN y arbitraje\n";
+      txt+="=========================================\n";
+      txt+="Triangulos: "+(string)total+" | Abiertos: "+(string)lcOpenThree+"\n";
+      txt+="P/L abierto: "+DoubleToString(openPL,2)+"\n";
+      txt+="IA score/conf: "+DoubleToString(avgScore,3)+" / "+DoubleToString(avgConf,1)+"%\n";
+      txt+="Trades IA: "+(string)totalTrades+" (W:"+(string)totalWins+" L:"+(string)totalLosses+") WR:"+DoubleToString(winRate,1)+"%\n";
+      txt+="----- RED NEURONAL -----\n";
+      txt+="NN estado: "+(inUseNeuralNet?(glNNReady?"ENTRENADA":"PENDIENTE"):"OFF")+"  TF: "+EnumToString(inNNTimeframe)+"\n";
+      txt+="NN acc/loss: "+DoubleToString(nnAccPct,1)+"% / "+DoubleToString(glNNTrainLoss,4)+"\n";
+      txt+="NN muestras: "+DoubleToString(glNNTrainSamples,0)+"  NN prom: "+DoubleToString(avgNN*100.0,1)+"%\n";
+      txt+="Fuerza NN prom: "+DoubleToString(nnStrengthAvg,1)+"%\n";
+      txt+="Ult train: "+(glNNLastTrain>0?TimeToString(glNNLastTrain,TIME_DATE|TIME_MINUTES):"N/A")+"\n";
+
+      if(bestIdx>=0)
+        {
+         double edgeBuy=MxSmb[bestIdx].PLBuy-MxSmb[bestIdx].spreadbuy;
+         double edgeSell=MxSmb[bestIdx].PLSell-MxSmb[bestIdx].spreadsell;
+         string dir=(edgeBuy>=edgeSell)?"BUY":"SELL";
+         txt+="-----------------------------------------\n";
+         txt+="Mejor oportunidad: "+dir+"\n";
+         txt+=MxSmb[bestIdx].smb1.name+"+"+MxSmb[bestIdx].smb2.name+"+"+MxSmb[bestIdx].smb3.name+"\n";
+         txt+="Edge B/S: "+DoubleToString(edgeBuy,2)+" / "+DoubleToString(edgeSell,2)+"\n";
+         txt+="NN: "+DoubleToString(MxSmb[bestIdx].nnProb*100.0,1)+"%  Fuerza: "+DoubleToString(fnNNSignalStrength(MxSmb[bestIdx].nnProb)*100.0,1)+"%\n";
+         txt+="Conf IA: "+DoubleToString(MxSmb[bestIdx].aiConfidence,1)+"%  MM: "+DoubleToString(MxSmb[bestIdx].mmBias,0)+"\n";
+
+         txt+="Top oportunidades:\n";
+         for(int t=0;t<3;t++)
+           {
+            int idx=topIdx[t];
+            if(idx<0) continue;
+            double eb=MxSmb[idx].PLBuy-MxSmb[idx].spreadbuy;
+            double es=MxSmb[idx].PLSell-MxSmb[idx].spreadsell;
+            string d=(eb>=es)?"B":"S";
+            txt+=(string)(t+1)+") "+d+" "+MxSmb[idx].smb1.name+"+"+MxSmb[idx].smb2.name+"+"+MxSmb[idx].smb3.name;
+            txt+=" edge:"+DoubleToString(topEdge[t],2)+" nn:"+DoubleToString(MxSmb[idx].nnProb*100.0,0)+"%\n";
+           }
+        }
+     }
+
+   color panelColor=background_color;
+   if(bestEdge>0.0) panelColor=(color)C'16,52,33';
+   if(bestEdge<0.0) panelColor=(color)C'54,24,24';
+
+   if(ObjectFind(0,glPanelBgName)<0 && !ObjectCreate(0,glPanelBgName,OBJ_RECTANGLE_LABEL,0,0,0))
+      return;
+
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_CORNER,inPanelCorner);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_XDISTANCE,xDist);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_YDISTANCE,yDist);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_XSIZE,panelW);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_YSIZE,panelH);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_BGCOLOR,panelColor);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_COLOR,clrDimGray);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_BACK,false);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_HIDDEN,false);
+
+   if(ObjectFind(0,glPanelHeaderName)<0) ObjectCreate(0,glPanelHeaderName,OBJ_LABEL,0,0,0);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_CORNER,inPanelCorner);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_XDISTANCE,xDist+safePadding);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_YDISTANCE,yDist+MathMax(4,safePadding/2));
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_COLOR,inPanelHeaderColor);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_FONTSIZE,headerFont);
+   ObjectSetString(0,glPanelHeaderName,OBJPROP_FONT,"Segoe UI Bold");
+   ObjectSetString(0,glPanelHeaderName,OBJPROP_TEXT,compactPanel?"ARB IA/NN":"ARBITRAJE TRIANGULAR IA/NN");
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_HIDDEN,false);
+
+   if(ObjectFind(0,glPanelTextName)<0) ObjectCreate(0,glPanelTextName,OBJ_LABEL,0,0,0);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_CORNER,inPanelCorner);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_XDISTANCE,xDist+safePadding);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_YDISTANCE,yDist+safePadding+14);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_COLOR,inPanelTextColor);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_FONTSIZE,textFont);
+   ObjectSetString(0,glPanelTextName,OBJPROP_FONT,"Consolas");
+   ObjectSetString(0,glPanelTextName,OBJPROP_TEXT,txt);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_HIDDEN,false);
+   ChartRedraw(0);
+  }
 
 
-//+------------------------------------------------------------------+
-//|                                                                  |
-//+------------------------------------------------------------------+
 void fnWarning(double lot,int &fh)
   {
 // Verifique la corrección de establecer el volumen de comercio, no podemos comerciar en volumen negativo
@@ -330,12 +1060,13 @@ void fnSetThree(stThree &MxSmb[],enMode mode)//CAMBIADO  JP
 //tiene triángulos de archivo
 void fnGetThreeFromFile(stThree &MxSmb[])
   {
-// si no se encuentra el archivo de símbolos, imprima sobre él y salga
+// si no se encuentra el archivo de símbolos, usar fallback a Market Watch en vez de retirar el EA
    int fh=FILEOPENREAD(FILENAME);
    if(fh==INVALID_HANDLE)
      {
-      Print("Archivo con símbolos no leídos!");
-      ExpertRemove();
+      Print("Archivo con símbolos no leído: "+FILENAME+". Fallback a Market Watch.");
+      fnGetThreeFromMarketWatch(MxSmb);
+      return;
      }
 
 // mover el carro al comienzo del archivo
@@ -857,8 +1588,44 @@ void fnCalcDelta(stThree &MxSmb[],double prft,string cmnt,int magic,double lot,u
       MxSmb[i].spreadbuy=NormalizeDouble(MxSmb[i].spreadbuy,2);
       MxSmb[i].spreadsell=NormalizeDouble(MxSmb[i].spreadsell,2);
 
-      // Si hay ganancias potenciales, entonces es necesario realizar más controles sobre la adecuación de los fondos para la apertura         
-      if(MxSmb[i].PLBuy>MxSmb[i].spreadbuy || MxSmb[i].PLSell>MxSmb[i].spreadsell)
+      // Métrica de edge y confianza para panel/filtro adaptativo IA
+      double edgeBuy=MxSmb[i].PLBuy-MxSmb[i].spreadbuy;
+      double edgeSell=MxSmb[i].PLSell-MxSmb[i].spreadsell;
+      double bestEdge=MathMax(edgeBuy,edgeSell);
+      double worstEdge=MathMin(edgeBuy,edgeSell);
+      double den=MathAbs(bestEdge)+MathAbs(worstEdge)+0.00001;
+      MxSmb[i].aiConfidence=fnClamp(((bestEdge-worstEdge)/den)*100.0,0.0,100.0);
+
+      bool allowByIA=true;
+      if(inUseIA)
+        {
+         double minScore=-0.25+inAIAgressividad*0.50;
+         double minConf=20.0+inAIAgressividad*55.0;
+         allowByIA=(MxSmb[i].aiScore>=minScore && MxSmb[i].aiConfidence>=minConf);
+        }
+
+      // Red neuronal + filtros técnicos EMA50/200 y TDI + sesgo Market Maker
+      double spreadPts=(double)SymbolInfoInteger(MxSmb[i].smb1.name,SYMBOL_SPREAD);
+      MxSmb[i].nnProb=fnPredictNN(MxSmb[i].smb1.name,spreadPts);
+      double ema50Now=fnEMAFromClose(MxSmb[i].smb1.name,inNNTimeframe,50,0);
+      double ema200Now=fnEMAFromClose(MxSmb[i].smb1.name,inNNTimeframe,200,0);
+      double tdiNow=fnCalcTDI(MxSmb[i].smb1.name,inNNTimeframe,0);
+      MxSmb[i].mmBias=0;
+      if(ema50Now>ema200Now && tdiNow>0) MxSmb[i].mmBias=1;
+      if(ema50Now<ema200Now && tdiNow<0) MxSmb[i].mmBias=-1;
+
+      double nnStrength=fnNNSignalStrength(MxSmb[i].nnProb);
+      double minNNStrength=0.08+inAIAgressividad*0.22;
+      double dynBuyThr=fnClamp(inNNBuyThreshold-0.05*(MxSmb[i].aiConfidence/100.0),0.50,0.85);
+      double dynSellThr=fnClamp(inNNSellThreshold+0.05*(MxSmb[i].aiConfidence/100.0),0.15,0.50);
+
+      bool nnAllowBuy=(!inUseNeuralNet || (MxSmb[i].nnProb>=dynBuyThr && nnStrength>=minNNStrength));
+      bool nnAllowSell=(!inUseNeuralNet || (MxSmb[i].nnProb<=dynSellThr && nnStrength>=minNNStrength));
+      bool mmAllowBuy=(!inUseMMMethod || MxSmb[i].mmBias>=0);
+      bool mmAllowSell=(!inUseMMMethod || MxSmb[i].mmBias<=0);
+
+      // Si hay ganancias potenciales, entonces es necesario realizar más controles sobre la adecuación de los fondos para la apertura
+      if((MxSmb[i].PLBuy>MxSmb[i].spreadbuy || MxSmb[i].PLSell>MxSmb[i].spreadsell) && allowByIA)
         {
          // No me molesté con la dirección de la transacción, solo calculé el margen total para la compra, todavía es más alto que para la venta
          // También vale la pena prestar atención al coeficiente creciente
@@ -886,7 +1653,7 @@ void fnCalcDelta(stThree &MxSmb[],double prft,string cmnt,int magic,double lot,u
         // Por defecto en la define MAXTIMEWAIT se pone el tiempo de espera hasta la apertura total en 3 segundos.
         // Si no nos hemos abierto durante este tiempo, enviamos lo que ha logrado abrirse para el cierre.
 
-         if(MxSmb[i].PLBuy>MxSmb[i].spreadbuy)
+         if(MxSmb[i].PLBuy>MxSmb[i].spreadbuy && nnAllowBuy && mmAllowBuy)
            {
             MxSmb[i].smb3.mrg=MarketInfo(MxSmb[i].smb3.name,MODE_MARGINREQUIRED)*MxSmb[i].smb3.lotbuy;
 
@@ -895,7 +1662,7 @@ void fnCalcDelta(stThree &MxSmb[],double prft,string cmnt,int magic,double lot,u
            }
          else
 
-         if(MxSmb[i].PLSell>MxSmb[i].spreadsell)
+         if(MxSmb[i].PLSell>MxSmb[i].spreadsell && nnAllowSell && mmAllowSell)
            {
             MxSmb[i].smb3.mrg=MarketInfo(MxSmb[i].smb3.name,MODE_MARGINREQUIRED)*MxSmb[i].smb3.lotsell;
 
@@ -1138,6 +1905,7 @@ void fnCloseThree(stThree &MxSmb[],int i,int fh)
    if(MxSmb[i].smb1.tkt<=0 && MxSmb[i].smb2.tkt<=0 && MxSmb[i].smb3.tkt<=0)
      {
       fnControlFile(MxSmb,i,glFileLog);
+      fnUpdateAIScore(MxSmb,i);
       MxSmb[i].smb1.side=0;
       MxSmb[i].smb2.side=0;
       MxSmb[i].smb3.side=0;
@@ -1215,6 +1983,7 @@ void fnCmnt(stThree &MxSmb[],ushort lcOpenThree)
                             
    if((bool)MQLInfoInteger(MQL_TESTER)) txt="EA es una moneda múltiple y el modo de prueba no es compatible";
    Comment(txt);
+   fnDrawRightPanel(MxSmb,lcOpenThree);
   }
   
  
