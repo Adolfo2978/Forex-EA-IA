@@ -58,6 +58,18 @@ input      double      inNNBuyThreshold=0.56;  // Umbral probabilidad compra
 input      double      inNNSellThreshold=0.44; // Umbral probabilidad venta
 input      bool        inUseMMMethod=true;     // Filtro Market Maker
 
+input      bool        inPanelVisible=true;      // Mostrar panel de la derecha
+input      ENUM_BASE_CORNER inPanelCorner=CORNER_RIGHT_UPPER; // Esquina del panel
+input      int         inPanelX=10;              // Distancia X del panel
+input      int         inPanelY=6;               // Distancia Y del panel
+input      int         inPanelWidth=430;         // Ancho objetivo del panel
+input      int         inPanelHeight=360;        // Alto objetivo del panel
+input      int         inPanelPadding=14;        // Padding interno
+input      int         inPanelHeaderFont=10;     // Tamaño fuente cabecera
+input      int         inPanelTextFont=9;        // Tamaño fuente texto
+input      color       inPanelHeaderColor=clrGold; // Color cabecera
+input      color       inPanelTextColor=clrWhiteSmoke; // Color texto
+input      string      inPanelNamePrefix="ARB_PANEL"; // Prefijo de objetos del panel
 
 int         glAccountsType=0; // tipo de cuenta. cobertura o red
 int         glFileLog=0;      // manejar el archivo de registro
@@ -330,10 +342,11 @@ int OnInit()
 
    Print("===============================================\nStart EA: "+MQLInfoString(MQL_PROGRAM_NAME));
 
+   string panelBase=(inPanelNamePrefix==""?"ARB_PANEL":inPanelNamePrefix);
    string panelSuffix="_"+(string)ChartID()+"_"+(string)inMagic;
-   glPanelBgName="ARB_PANEL_BG"+panelSuffix;
-   glPanelTextName="ARB_PANEL_TEXT"+panelSuffix;
-   glPanelHeaderName="ARB_PANEL_HDR"+panelSuffix;
+   glPanelBgName=panelBase+"_BG"+panelSuffix;
+   glPanelTextName=panelBase+"_TEXT"+panelSuffix;
+   glPanelHeaderName=panelBase+"_HDR"+panelSuffix;
 
    fnWarning(inLot,glFileLog);                      //varias comprobaciones durante el lanzamiento del robot
    fnSetThree(MxThree,inMode);                        //triángulos compuestos
@@ -797,6 +810,12 @@ double fnPredictNN(string smb,double spreadPts)
 
 void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
   {
+   if(!inPanelVisible)
+     {
+      fnDeletePanel();
+      return;
+     }
+
    string txt="Estado IA/NN y arbitraje\n";
    txt+="=========================================\n";
 
@@ -897,21 +916,33 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
    long chartW=0,chartH=0;
    ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0,chartW);
    ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0,chartH);
-   if(chartW<=0) chartW=430;
-   if(chartH<=0) chartH=360;
+   if(chartW<=0) chartW=inPanelWidth;
+   if(chartH<=0) chartH=inPanelHeight;
 
-   int usableW=(int)MathMax(120,chartW-6);
-   int usableH=(int)MathMax(150,chartH-8);
-   int panelW=(int)MathMin(430,usableW);
-   int panelH=(int)MathMin(360,usableH);
-   int xDist=(chartW>panelW+12?10:2);
-   int yDist=6;
-   bool compactPanel=(panelW<280 || panelH<230);
+   int safePadding=(int)MathMax(6,MathMin(40,inPanelPadding));
+   int usableW=(int)MathMax(120,chartW-2);
+   int usableH=(int)MathMax(140,chartH-2);
+   int panelW=(int)MathMax(180,MathMin((double)usableW,(double)inPanelWidth));
+   int panelH=(int)MathMax(160,MathMin((double)usableH,(double)inPanelHeight));
+
+   int maxX=(int)MathMax(0,chartW-panelW);
+   int maxY=(int)MathMax(0,chartH-panelH);
+   int xDist=(int)MathMin((double)MathMax(0,inPanelX),(double)maxX);
+   int yDist=(int)MathMin((double)MathMax(0,inPanelY),(double)maxY);
+   bool compactPanel=(panelW<300 || panelH<240);
+
+   int headerFont=(int)MathMax(7,MathMin(18,inPanelHeaderFont));
+   int textFont=(int)MathMax(6,MathMin(16,inPanelTextFont));
+   if(compactPanel)
+     {
+      headerFont=(int)MathMax(7,headerFont-1);
+      textFont=(int)MathMax(6,textFont-1);
+     }
 
    if(ObjectFind(0,glPanelBgName)<0 && !ObjectCreate(0,glPanelBgName,OBJ_RECTANGLE_LABEL,0,0,0))
       return;
 
-   ObjectSetInteger(0,glPanelBgName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0,glPanelBgName,OBJPROP_CORNER,inPanelCorner);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_XDISTANCE,xDist);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_YDISTANCE,yDist);
    ObjectSetInteger(0,glPanelBgName,OBJPROP_XSIZE,panelW);
@@ -923,22 +954,22 @@ void fnDrawRightPanel(stThree &MxSmb[],ushort lcOpenThree)
    ObjectSetInteger(0,glPanelBgName,OBJPROP_HIDDEN,false);
 
    if(ObjectFind(0,glPanelHeaderName)<0) ObjectCreate(0,glPanelHeaderName,OBJ_LABEL,0,0,0);
-   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_XDISTANCE,xDist+14);
-   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_YDISTANCE,yDist+8);
-   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_COLOR,clrGold);
-   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_FONTSIZE,compactPanel?8:10);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_CORNER,inPanelCorner);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_XDISTANCE,xDist+safePadding);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_YDISTANCE,yDist+MathMax(4,safePadding/2));
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_COLOR,inPanelHeaderColor);
+   ObjectSetInteger(0,glPanelHeaderName,OBJPROP_FONTSIZE,headerFont);
    ObjectSetString(0,glPanelHeaderName,OBJPROP_FONT,"Segoe UI Bold");
    ObjectSetString(0,glPanelHeaderName,OBJPROP_TEXT,compactPanel?"ARB IA/NN":"ARBITRAJE TRIANGULAR IA/NN");
    ObjectSetInteger(0,glPanelHeaderName,OBJPROP_SELECTABLE,false);
    ObjectSetInteger(0,glPanelHeaderName,OBJPROP_HIDDEN,false);
 
    if(ObjectFind(0,glPanelTextName)<0) ObjectCreate(0,glPanelTextName,OBJ_LABEL,0,0,0);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_XDISTANCE,xDist+14);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_YDISTANCE,yDist+28);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_COLOR,clrWhiteSmoke);
-   ObjectSetInteger(0,glPanelTextName,OBJPROP_FONTSIZE,compactPanel?7:9);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_CORNER,inPanelCorner);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_XDISTANCE,xDist+safePadding);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_YDISTANCE,yDist+safePadding+14);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_COLOR,inPanelTextColor);
+   ObjectSetInteger(0,glPanelTextName,OBJPROP_FONTSIZE,textFont);
    ObjectSetString(0,glPanelTextName,OBJPROP_FONT,"Consolas");
    ObjectSetString(0,glPanelTextName,OBJPROP_TEXT,txt);
    ObjectSetInteger(0,glPanelTextName,OBJPROP_SELECTABLE,false);
