@@ -240,6 +240,12 @@ input bool InpRFIPlaySound = true;                 // Play sound alerts
 input bool InpRFIPush = false;                     // Send mobile notifications
 input string InpRFISoundFile = "alert2.wav";      // Alert sound file
 
+
+input group "┌─ MTF SIGNAL (15M/H1/H4)"
+input bool InpUseMTF15H1H4Signal = true;          // Require MTF signal alignment (15M/H1/H4)
+input int InpMTFMinAlignedFrames = 2;             // Min aligned frames (2 or 3)
+input int InpMTFFastEMA = 50;                     // Fast EMA for MTF trend
+input int InpMTFSlowEMA = 200;                    // Slow EMA for MTF trend
 //+------------------------------------------------------------------+
 //| Global Variables                                                 |
 //+------------------------------------------------------------------+
@@ -312,6 +318,49 @@ double ComputeATRFromPrices(string symbol, ENUM_TIMEFRAMES tf, int period, int s
    }
    if(count<=0) return 0.0;
    return sumTR/count;
+}
+
+
+int GetTrendDirectionByEMA(string symbol, ENUM_TIMEFRAMES tf, int fastPeriod, int slowPeriod, int shift)
+{
+   int hFast=iMA(symbol, tf, fastPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   int hSlow=iMA(symbol, tf, slowPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   if(hFast==INVALID_HANDLE || hSlow==INVALID_HANDLE)
+   {
+      if(hFast!=INVALID_HANDLE) IndicatorRelease(hFast);
+      if(hSlow!=INVALID_HANDLE) IndicatorRelease(hSlow);
+      return 0;
+   }
+
+   double fastBuf[1], slowBuf[1];
+   bool okFast=(CopyBuffer(hFast,0,shift,1,fastBuf)==1);
+   bool okSlow=(CopyBuffer(hSlow,0,shift,1,slowBuf)==1);
+   IndicatorRelease(hFast);
+   IndicatorRelease(hSlow);
+   if(!okFast || !okSlow) return 0;
+
+   if(fastBuf[0]>slowBuf[0]) return 1;
+   if(fastBuf[0]<slowBuf[0]) return -1;
+   return 0;
+}
+
+bool CheckMTF15H1H4Signal(string symbol, bool isBuy, int &alignedCount, string &detail)
+{
+   alignedCount=0;
+
+   int d15=GetTrendDirectionByEMA(symbol, PERIOD_M15, InpMTFFastEMA, InpMTFSlowEMA, 0);
+   int dH1=GetTrendDirectionByEMA(symbol, PERIOD_H1, InpMTFFastEMA, InpMTFSlowEMA, 0);
+   int dH4=GetTrendDirectionByEMA(symbol, PERIOD_H4, InpMTFFastEMA, InpMTFSlowEMA, 0);
+
+   int expected = isBuy ? 1 : -1;
+   if(d15==expected) alignedCount++;
+   if(dH1==expected) alignedCount++;
+   if(dH4==expected) alignedCount++;
+
+   detail=StringFormat("M15=%d H1=%d H4=%d aligned=%d", d15,dH1,dH4,alignedCount);
+
+   int minFrames=MathMax(1, MathMin(3, InpMTFMinAlignedFrames));
+   return(alignedCount>=minFrames);
 }
 
 bool ComputeRFILevels(string symbol, ENUM_TIMEFRAMES tf, int lookback, double minImpulseATR,
@@ -1029,6 +1078,19 @@ void AnalyzeAndTradeSingle()
       LogBlock(_Symbol, "mtf requerido");
       return;
    }
+
+   if(InpUseMTF15H1H4Signal)
+   {
+      bool isBuy=(technicalSignal==SIGNAL_BUY || technicalSignal==SIGNAL_STRONG_BUY || technicalSignal==SIGNAL_CONFIRMED_BUY || technicalSignal==SIGNAL_WEAK_BUY || technicalSignal==SIGNAL_MODERATE_BUY);
+      int aligned=0; string mtfDetail="";
+      if(!CheckMTF15H1H4Signal(_Symbol,isBuy,aligned,mtfDetail))
+      {
+         Print("MTF 15M/H1/H4 no alineado: ", mtfDetail);
+         LogBlock(_Symbol, "mtf 15m/h1/h4");
+         return;
+      }
+      combinedConfidence += aligned*1.5;
+   }
    
    finalSignal = GetFinalSignal(technicalSignal, combinedConfidence);
    Print("=== SEÑAL APROBADA ===");
@@ -1186,6 +1248,18 @@ void ProcessMultiPairSignals()
       {
          LogBlock(best.symbol, "mtf no alineado");
          return;
+      }
+
+      if(InpUseMTF15H1H4Signal)
+      {
+         bool isBuyBest=(best.signal==SIGNAL_BUY || best.signal==SIGNAL_STRONG_BUY || best.signal==SIGNAL_CONFIRMED_BUY || best.signal==SIGNAL_WEAK_BUY || best.signal==SIGNAL_MODERATE_BUY);
+         int aligned=0; string mtfDetail="";
+         if(!CheckMTF15H1H4Signal(best.symbol,isBuyBest,aligned,mtfDetail))
+         {
+            LogBlock(best.symbol, "mtf 15m/h1/h4 multi");
+            if(InpDebugMode) Print("MTF 15M/H1/H4 multi blocked: ", mtfDetail);
+            return;
+         }
       }
    
    if(InpUseMarketMaker && InpUseKillZoneFilter)
